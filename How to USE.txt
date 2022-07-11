@@ -1,0 +1,5 @@
+in command prompt, run:
+grems config.json
+
+About config.json:
+temporal values in seconds, spatial values in um
