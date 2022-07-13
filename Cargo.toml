@@ -19,6 +19,7 @@ nalgebra = { version = "0.31", features = ["bytemuck"] }
 ndarray = { version = "0.15.4" }
 config = "0.13"
 serde = { version = "1", features = ["derive"] }
+wgpu_glyph = "0.17"
 
 [profile.release]
 lto = "fat"

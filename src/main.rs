@@ -78,6 +78,15 @@ fn main() -> anyhow::Result<()> {
 
     surface.configure(&device, &surface_config);
 
+    let mut staging_belt = wgpu::util::StagingBelt::new(1024);
+
+    let roboto = wgpu_glyph::ab_glyph::FontArc::try_from_slice(include_bytes!(
+        "../fonts/Roboto-Regular.ttf"
+    ))?;
+
+    let mut glyph_brush =
+        wgpu_glyph::GlyphBrushBuilder::using_font(roboto).build(&device, surface_config.format);
+
     let settings = config::Config::builder()
         .add_source(config::File::with_name(&options.preset))
         .build()?;
@@ -188,8 +197,33 @@ fn main() -> anyhow::Result<()> {
                 fdtd.visualize(&mut render_pass);
             }
 
+            glyph_brush.queue(wgpu_glyph::Section {
+                screen_position: (0.0, 0.0),
+                bounds: (surface_config.width as f32, surface_config.height as f32),
+                text: vec![
+                    wgpu_glyph::Text::new(&format!("Time step: {}", step_counter))
+                        .with_color([0.0, 0.0, 0.0, 1.0])
+                        .with_scale(40.0),
+                ],
+                ..Default::default()
+            });
+
+            glyph_brush
+                .draw_queued(
+                    &device,
+                    &mut staging_belt,
+                    &mut encoder,
+                    &surf_texture_view,
+                    surface_config.width,
+                    surface_config.height,
+                )
+                .unwrap();
+
+            staging_belt.finish();
             queue.submit(std::iter::once(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
             surface_texture.present();
+            staging_belt.recall();
         }
         _ => (),
     });

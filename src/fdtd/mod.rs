@@ -210,8 +210,15 @@ impl FDTD {
                 }],
             });
 
-        let shader_module =
-            device.create_shader_module(wgpu::include_wgsl!("../shader/fdtd/fdtd-3d.wgsl"));
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("FDTD Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(std::fs::read_to_string(
+                std::env::current_dir()?
+                    .join("shader")
+                    .join("fdtd")
+                    .join("fdtd-3d.wgsl"),
+            )?)),
+        });
 
         let update_magnetic_field_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -310,7 +317,12 @@ impl FDTD {
                 push_constant_ranges: &[],
             });
 
-        let shader_module = device.create_shader_module(wgpu::include_wgsl!("../shader/blit.wgsl"));
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Blit Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(std::fs::read_to_string(
+                std::env::current_dir()?.join("shader").join("blit.wgsl"),
+            )?)),
+        });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
