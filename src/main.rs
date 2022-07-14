@@ -10,11 +10,11 @@ struct GremOptions {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct FDTDSettings {
-    dimension: [f32; 3],
+    domain: [[f32; 2]; 3],
     spatial_step: f32,
     temporal_step: f32,
     gltfs: Vec<GLTFSettings>,
-    source: SourceSettings,
+    sources: Vec<SourceSettings>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -27,8 +27,14 @@ pub struct GLTFSettings {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct SourceSettings {
+    wavelength: f32,
+    position: [f32; 3],
+    size: [f32; 3],
+    direction: [f32; 3],
+    phase: f32,
     delay: f32,
-    width: f32,
+    fwhm: f32,
+    power: f32,
 }
 
 #[repr(C)]
@@ -60,7 +66,7 @@ fn main() -> anyhow::Result<()> {
             features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
                 | wgpu::Features::PUSH_CONSTANTS,
             limits: wgpu::Limits {
-                max_push_constant_size: 32,
+                max_push_constant_size: 60,
                 max_compute_invocations_per_workgroup: 512,
                 ..Default::default()
             },
@@ -97,8 +103,8 @@ fn main() -> anyhow::Result<()> {
         &device,
         &queue,
         settings.spatial_step,
-        settings.temporal_step,
-        settings.dimension,
+        settings.temporal_step * 1e-6 / physical_constants::SPEED_OF_LIGHT_IN_VACUUM as f32,
+        settings.domain,
         settings.gltfs,
     )?;
 
@@ -141,37 +147,62 @@ fn main() -> anyhow::Result<()> {
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             while elapsed >= tau {
                 elapsed -= tau;
-                let additive_source_strength = (-((step_counter as f32 * settings.temporal_step
-                    - settings.source.delay)
-                    / settings.source.width)
+                fdtd.update_magnetic_field(&mut encoder);
+                fdtd.update_electric_field(&mut encoder);
+                for source in settings.sources.iter() {
+                    let pulse_envelope = (-((std::f32::consts::PI
+                        * source.fwhm
+                        * (step_counter as f32 * settings.temporal_step - source.delay))
+                        .powi(2)
+                        / (4.0 * (2.0 as f32).ln()))
                     .powi(2))
-                .exp();
+                    .exp();
 
-                let screen_width = (settings.dimension[0] / settings.spatial_step).ceil() as u32;
-                let screen_height = (settings.dimension[1] / settings.spatial_step).ceil() as u32;
-                queue.write_texture(
-                    wgpu::ImageCopyTexture {
-                        texture: fdtd.get_electric_additive_source_map(),
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytemuck::cast_slice(&vec![
-                        [0.0, additive_source_strength, 0.0, 1.0];
-                        (screen_width * screen_height) as usize
-                    ]),
-                    wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: std::num::NonZeroU32::new(16 * screen_width),
-                        rows_per_image: std::num::NonZeroU32::new(screen_height),
-                    },
-                    wgpu::Extent3d {
-                        width: screen_width,
-                        height: screen_height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                fdtd.step(&mut encoder);
+                    let cw_component = (-2.0
+                        * std::f32::consts::PI
+                        * (step_counter as f32 * settings.temporal_step - source.delay)
+                        / source.wavelength
+                        - source.phase.to_radians())
+                    .cos();
+
+                    let direction = nalgebra::Vector3::from(source.direction).normalize();
+                    let actual_position = [
+                        ((source.position[0] - settings.domain[0][0] - source.size[0] / 2.0)
+                            / settings.spatial_step)
+                            .ceil() as u32,
+                        ((source.position[1] - settings.domain[1][0] - source.size[1] / 2.0)
+                            / settings.spatial_step)
+                            .ceil() as u32,
+                        ((source.position[2] - settings.domain[2][0] - source.size[2] / 2.0)
+                            / settings.spatial_step)
+                            .ceil() as u32,
+                    ];
+                    let actual_size = [
+                        if source.size[0] > 0.0 {
+                            (source.size[0] / settings.spatial_step).ceil() as u32
+                        } else {
+                            1
+                        },
+                        if source.size[0] > 0.0 {
+                            (source.size[1] / settings.spatial_step).ceil() as u32
+                        } else {
+                            1
+                        },
+                        if source.size[0] > 0.0 {
+                            (source.size[1] / settings.spatial_step).ceil() as u32
+                        } else {
+                            1
+                        },
+                    ];
+
+                    fdtd.excite_electric_field(
+                        &mut encoder,
+                        actual_position,
+                        actual_size,
+                        (direction * pulse_envelope * cw_component * source.power).into(),
+                    );
+                }
+
                 step_counter += 1;
             }
 

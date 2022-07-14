@@ -3,12 +3,9 @@ use wgpu::util::DeviceExt;
 pub struct FDTD {
     electric_field_bind_group: wgpu::BindGroup,
     magnetic_field_bind_group: wgpu::BindGroup,
-    electric_additive_source_bind_group: wgpu::BindGroup,
-    magnetic_additive_source_bind_group: wgpu::BindGroup,
-    electric_additive_source_map: wgpu::Texture,
-    magnetic_additive_source_map: wgpu::Texture,
     update_magnetic_field_pipeline: wgpu::ComputePipeline,
     update_electric_field_pipeline: wgpu::ComputePipeline,
+    excite_field_pipeline: wgpu::ComputePipeline,
     grid_dimension: [u32; 3],
 
     // visualize
@@ -23,14 +20,27 @@ impl FDTD {
         queue: &wgpu::Queue,
         dx: f32, // micrometer
         dt: f32, // seconds
-        dimension: [f32; 3],
+        dimension: [[f32; 2]; 3],
         gltfs: Vec<crate::GLTFSettings>,
     ) -> anyhow::Result<Self> {
-        let grid_x = (dimension[0] / dx).ceil() as u32;
-        let grid_y = (dimension[1] / dx).ceil() as u32;
-        let grid_z = (dimension[2] / dx).ceil() as u32;
+        anyhow::ensure!(
+            dimension[0][1] > dimension[0][0],
+            "RHS of dimension[0] is less or equal then LHS!"
+        );
+        anyhow::ensure!(
+            dimension[1][1] > dimension[1][0],
+            "RHS of dimension[1] is less or equal then LHS!"
+        );
+        anyhow::ensure!(
+            dimension[2][1] > dimension[2][0],
+            "RHS of dimension[2] is less or equal then LHS!"
+        );
 
-        let mut common_texture_descriptor = wgpu::TextureDescriptor {
+        let grid_x = ((dimension[0][1] - dimension[0][0]) / dx).ceil() as u32;
+        let grid_y = ((dimension[1][1] - dimension[1][0]) / dx).ceil() as u32;
+        let grid_z = ((dimension[2][1] - dimension[2][0]) / dx).ceil() as u32;
+
+        let common_texture_descriptor = wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
                 width: grid_x,
@@ -57,8 +67,6 @@ impl FDTD {
             gltf_importer::MaterialConstants {
                 permittivity: physical_constants::VACUUM_ELECTRIC_PERMITTIVITY as _,
                 permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
-                electric_conductivity: 0.0,
-                magnetic_conductivity: 0.0,
             },
         );
         for gltf in gltfs {
@@ -70,8 +78,6 @@ impl FDTD {
                     permittivity: physical_constants::VACUUM_ELECTRIC_PERMITTIVITY as f32
                         * (gltf.refractive_index * gltf.refractive_index),
                     permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
-                    electric_conductivity: 0.0,
-                    magnetic_conductivity: 0.0,
                 },
             )?;
         }
@@ -108,7 +114,7 @@ impl FDTD {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::ReadOnly,
-                            format: wgpu::TextureFormat::Rgba32Float,
+                            format: wgpu::TextureFormat::Rg32Float,
                             view_dimension: wgpu::TextureViewDimension::D3,
                         },
                         count: None,
@@ -154,59 +160,23 @@ impl FDTD {
             ],
         });
 
-        common_texture_descriptor.usage =
-            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::STORAGE_BINDING;
-
-        let electric_additive_source_map = device.create_texture(&common_texture_descriptor);
-        let electric_additive_source_view =
-            electric_additive_source_map.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let magnetic_additive_source_map = device.create_texture(&common_texture_descriptor);
-        let magnetic_additive_source_view =
-            magnetic_additive_source_map.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let additive_source_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: wgpu::TextureFormat::Rgba32Float,
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                    },
-                    count: None,
-                }],
-            });
-
-        let electric_additive_source_bind_group =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &additive_source_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&electric_additive_source_view),
-                }],
-            });
-
-        let magnetic_additive_source_bind_group =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &additive_source_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&magnetic_additive_source_view),
-                }],
-            });
-
-        let common_pipeline_layout =
+        let update_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&field_bind_group_layout, &additive_source_layout],
+                bind_group_layouts: &[&field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
                     range: 0..12,
+                }],
+            });
+
+        let excite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&field_bind_group_layout],
+                push_constant_ranges: &[wgpu::PushConstantRange {
+                    stages: wgpu::ShaderStages::COMPUTE,
+                    range: 16..60,
                 }],
             });
 
@@ -223,7 +193,7 @@ impl FDTD {
         let update_magnetic_field_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
-                layout: Some(&common_pipeline_layout),
+                layout: Some(&update_pipeline_layout),
                 module: &shader_module,
                 entry_point: "update_magnetic_field",
             });
@@ -231,9 +201,17 @@ impl FDTD {
         let update_electric_field_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
-                layout: Some(&common_pipeline_layout),
+                layout: Some(&update_pipeline_layout),
                 module: &shader_module,
                 entry_point: "update_electric_field",
+            });
+
+        let excite_field_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&excite_pipeline_layout),
+                module: &shader_module,
+                entry_point: "excite_field",
             });
 
         let rect = [
@@ -357,37 +335,61 @@ impl FDTD {
         Ok(Self {
             electric_field_bind_group,
             magnetic_field_bind_group,
-            electric_additive_source_map,
-            magnetic_additive_source_map,
-            electric_additive_source_bind_group,
-            magnetic_additive_source_bind_group,
             update_magnetic_field_pipeline,
             update_electric_field_pipeline,
             grid_dimension: [grid_x, grid_y, grid_z],
             rect_vertices,
             electric_field_render_bind_group,
             render_pipeline,
+            excite_field_pipeline,
         })
     }
 
-    pub fn step(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn update_magnetic_field(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&self.update_magnetic_field_pipeline);
         cpass.set_bind_group(0, &self.magnetic_field_bind_group, &[]);
-        cpass.set_bind_group(1, &self.magnetic_additive_source_bind_group, &[]);
         cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[2] as f32 / 8.0).ceil() as u32,
         );
+    }
+
+    pub fn _excite_magnetic_field(&self, _encoder: &mut wgpu::CommandEncoder) {
+        unimplemented!("not used")
+    }
+
+    pub fn update_electric_field(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&self.update_electric_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        cpass.set_bind_group(1, &self.electric_additive_source_bind_group, &[]);
+        cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[2] as f32 / 8.0).ceil() as u32,
+        );
+    }
+
+    pub fn excite_electric_field(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        position: [u32; 3],
+        size: [u32; 3],
+        strength: [f32; 3],
+    ) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&self.excite_field_pipeline);
+        cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
+        cpass.set_push_constants(16, bytemuck::cast_slice(&position));
+        cpass.set_push_constants(32, bytemuck::cast_slice(&size));
+        cpass.set_push_constants(48, bytemuck::cast_slice(&strength));
+        cpass.dispatch_workgroups(
+            (size[0] as f32 / 8.0).ceil() as u32,
+            (size[1] as f32 / 8.0).ceil() as u32,
+            (size[2] as f32 / 8.0).ceil() as u32,
         );
     }
 
@@ -396,10 +398,6 @@ impl FDTD {
         render_pass.set_vertex_buffer(0, self.rect_vertices.slice(..));
         render_pass.set_bind_group(0, &self.electric_field_render_bind_group, &[]);
         render_pass.draw(0..6, 0..1);
-    }
-
-    pub fn get_electric_additive_source_map<'a>(&'a self) -> &'a wgpu::Texture {
-        &self.electric_additive_source_map
     }
 }
 
@@ -415,40 +413,23 @@ pub mod gltf_importer {
     pub struct MaterialConstants {
         pub permittivity: f32,
         pub permeability: f32,
-        pub electric_conductivity: f32,
-        pub magnetic_conductivity: f32,
     }
 
     #[derive(Clone, Copy)]
     struct FDTDConstants {
-        pub ec1: f32,
         pub ec2: f32,
         pub ec3: f32,
-        pub hc1: f32,
         pub hc2: f32,
         pub hc3: f32,
     }
 
     impl FDTDConstants {
         fn from_material(material: MaterialConstants, dt: f32, dx: f32) -> Self {
-            let ec1 = (2.0 * material.permittivity - dt * material.electric_conductivity)
-                / (2.0 * material.permittivity + dt * material.electric_conductivity);
-            let ec3 =
-                -2.0 * dt / (2.0 * material.permittivity + dt * material.electric_conductivity);
+            let ec3 = -2.0 * dt / (2.0 * material.permittivity);
             let ec2 = ec3 / dx;
-            let hc1 = (2.0 * material.permeability - dt * material.magnetic_conductivity)
-                / (2.0 * material.permeability + dt * material.magnetic_conductivity);
-            let hc3 =
-                -2.0 * dt / (2.0 * material.permeability + dt * material.magnetic_conductivity);
+            let hc3 = -2.0 * dt / (2.0 * material.permeability);
             let hc2 = hc3 / dx;
-            Self {
-                ec1,
-                ec2,
-                ec3,
-                hc1,
-                hc2,
-                hc3,
-            }
+            Self { ec2, ec3, hc2, hc3 }
         }
     }
 
@@ -456,53 +437,40 @@ pub mod gltf_importer {
         grid_dimension: [u32; 3],
         dt: f32,
         dx: f32,
-        electric_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector4<f32>>>,
-        magnetic_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector4<f32>>>,
+        electric_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector2<f32>>>,
+        magnetic_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector2<f32>>>,
+        shift_vector: nalgebra::Vector3<f32>,
     }
     impl Importer {
-        pub fn new(dimension: [f32; 3], dt: f32, dx: f32, background: MaterialConstants) -> Self {
-            let grid_x = (dimension[0] / dx).ceil() as u32;
-            let grid_y = (dimension[1] / dx).ceil() as u32;
-            let grid_z = (dimension[2] / dx).ceil() as u32;
+        pub fn new(
+            dimension: [[f32; 2]; 3],
+            dt: f32,
+            dx: f32,
+            background: MaterialConstants,
+        ) -> Self {
+            let grid_x = ((dimension[0][1] - dimension[0][0]) / dx).ceil() as u32;
+            let grid_y = ((dimension[1][1] - dimension[1][0]) / dx).ceil() as u32;
+            let grid_z = ((dimension[2][1] - dimension[2][0]) / dx).ceil() as u32;
 
             Self {
                 electric_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        (2.0 * background.permittivity - dt * background.electric_conductivity)
-                            / (2.0 * background.permittivity
-                                + dt * background.electric_conductivity),
-                        -2.0 * dt
-                            / (dx
-                                * 1e-6
-                                * (2.0 * background.permittivity
-                                    + dt * background.electric_conductivity)),
-                        -2.0 * dt
-                            / (2.0 * background.permittivity
-                                + dt * background.electric_conductivity),
-                        1.0
+                        -2.0 * dt / (dx * 1e-6 * (2.0 * background.permittivity)),
+                        -2.0 * dt / (2.0 * background.permittivity)
                     ],
                 )),
                 magnetic_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        (2.0 * background.permeability - dt * background.magnetic_conductivity)
-                            / (2.0 * background.permeability
-                                + dt * background.magnetic_conductivity),
-                        -2.0 * dt
-                            / (dx
-                                * 1e-6
-                                * (2.0 * background.permeability
-                                    + dt * background.magnetic_conductivity)),
-                        -2.0 * dt
-                            / (2.0 * background.permeability
-                                + dt * background.magnetic_conductivity),
-                        1.0
+                        -2.0 * dt / (dx * 1e-6 * (2.0 * background.permeability)),
+                        -2.0 * dt / (2.0 * background.permeability)
                     ],
                 )),
                 grid_dimension: [grid_x, grid_y, grid_z],
                 dt,
                 dx,
+                shift_vector: -nalgebra::vector![dimension[0][0], dimension[1][0], dimension[2][0]],
             }
         }
 
@@ -520,11 +488,13 @@ pub mod gltf_importer {
             for node in scene.nodes() {
                 self.process_node(
                     node,
-                    nalgebra::Matrix4::new_translation(
-                        &(nalgebra::Vector3::from(position) / self.dx),
-                    ) * nalgebra::Matrix4::new_nonuniform_scaling(
-                        &(nalgebra::Vector3::from(scale) / self.dx),
-                    ),
+                    nalgebra::Matrix4::new_translation(&(self.shift_vector / self.dx))
+                        * nalgebra::Matrix4::new_translation(
+                            &(nalgebra::Vector3::from(position) / self.dx),
+                        )
+                        * nalgebra::Matrix4::new_nonuniform_scaling(
+                            &(nalgebra::Vector3::from(scale) / self.dx),
+                        ),
                     &buffers,
                     FDTDConstants::from_material(constants, self.dt, self.dx * 1e-6),
                 );
@@ -547,7 +517,7 @@ pub mod gltf_importer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D3,
-                format: wgpu::TextureFormat::Rgba32Float,
+                format: wgpu::TextureFormat::Rg32Float,
                 usage: wgpu::TextureUsages::STORAGE_BINDING,
             };
 
@@ -644,8 +614,8 @@ pub mod gltf_importer {
                                     let u = nominator_u / denominator;
                                     let v = nominator_v / denominator;
                                     let t = nominator_t / denominator;
-                                    if u >= 0.0 && u <= 1.0 && v >= 0.0 && u + v <= 1.0 && t >= 0.0
-                                    {
+                                    assert!(t >= 0.0, "OUT OF BOUND!");
+                                    if u >= 0.0 && u <= 1.0 && v >= 0.0 && u + v <= 1.0 {
                                         let h = p + ray * t;
                                         let x = h.x.round() as usize;
                                         let y = h.y.round() as usize;
@@ -678,19 +648,11 @@ pub mod gltf_importer {
                                 }
                                 if acc_lock[[idx_x, idx_y, idx_z]] % 2 == 1 {
                                     self.electric_constants.lock().unwrap()
-                                        [[idx_x, idx_y, idx_z]] = nalgebra::vector![
-                                        constants.ec1,
-                                        constants.ec2,
-                                        constants.ec3,
-                                        1.0
-                                    ];
+                                        [[idx_x, idx_y, idx_z]] =
+                                        nalgebra::vector![constants.ec2, constants.ec3];
                                     self.magnetic_constants.lock().unwrap()
-                                        [[idx_x, idx_y, idx_z]] = nalgebra::vector![
-                                        constants.hc1,
-                                        constants.hc2,
-                                        constants.hc3,
-                                        1.0
-                                    ];
+                                        [[idx_x, idx_y, idx_z]] =
+                                        nalgebra::vector![constants.hc2, constants.hc3];
                                 }
                             });
                         })
