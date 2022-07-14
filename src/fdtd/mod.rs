@@ -614,8 +614,8 @@ pub mod gltf_importer {
                                     let u = nominator_u / denominator;
                                     let v = nominator_v / denominator;
                                     let t = nominator_t / denominator;
-                                    assert!(t >= 0.0, "OUT OF BOUND!");
                                     if u >= 0.0 && u <= 1.0 && v >= 0.0 && u + v <= 1.0 {
+                                        assert!(t >= 0.0, "OUT OF BOUND!");
                                         let h = p + ray * t;
                                         let x = h.x.round() as usize;
                                         let y = h.y.round() as usize;
