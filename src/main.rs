@@ -13,6 +13,8 @@ struct FDTDSettings {
     domain: [[f32; 2]; 3],
     spatial_step: f32,
     temporal_step: f32,
+    fps: f32,
+    update_time_threshold: f32,
     gltfs: Vec<GLTFSettings>,
     sources: Vec<SourceSettings>,
 }
@@ -110,7 +112,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut step_counter = 0;
     let mut now = std::time::Instant::now();
-    let tau = std::time::Duration::from_secs_f32(1.0 / 60f32);
+    let tau = std::time::Duration::from_secs_f32(1.0 / settings.fps);
     let mut elapsed = std::time::Duration::ZERO;
     event_loop.run(move |event, _, control_flow| match event {
         winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
@@ -146,6 +148,10 @@ fn main() -> anyhow::Result<()> {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             while elapsed >= tau {
+                if elapsed >= std::time::Duration::from_secs_f32(settings.update_time_threshold) {
+                    elapsed = std::time::Duration::ZERO;
+                    break;
+                }
                 elapsed -= tau;
                 fdtd.update_magnetic_field(&mut encoder);
                 fdtd.update_electric_field(&mut encoder);
