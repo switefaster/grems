@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
         format: surface.get_supported_formats(&adapter)[0],
         width: window.inner_size().width,
         height: window.inner_size().height,
-        present_mode: wgpu::PresentMode::Fifo,
+        present_mode: wgpu::PresentMode::Immediate,
     };
 
     surface.configure(&device, &surface_config);
@@ -162,7 +162,7 @@ fn main() -> anyhow::Result<()> {
                         * std::f32::consts::PI
                         * (step_counter as f32 * settings.temporal_step - source.delay)
                         / source.wavelength
-                        - source.phase.to_radians())
+                        + source.phase.to_radians())
                     .cos();
 
                     let direction = nalgebra::Vector3::from(source.direction).normalize();
@@ -206,7 +206,19 @@ fn main() -> anyhow::Result<()> {
                 step_counter += 1;
             }
 
-            let surface_texture = surface.get_current_texture().unwrap();
+            let surface_texture = match surface.get_current_texture() {
+                Ok(texture) => texture,
+                Err(err) => match err {
+                    wgpu::SurfaceError::Timeout => {
+                        return;
+                    }
+                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+                        surface.configure(&device, &surface_config);
+                        return;
+                    }
+                    wgpu::SurfaceError::OutOfMemory => panic!("OUT OF MEMORY!"),
+                },
+            };
             let surf_texture_view = surface_texture
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -233,7 +245,7 @@ fn main() -> anyhow::Result<()> {
                 bounds: (surface_config.width as f32, surface_config.height as f32),
                 text: vec![
                     wgpu_glyph::Text::new(&format!("Time step: {}", step_counter))
-                        .with_color([0.0, 0.0, 0.0, 1.0])
+                        .with_color([1.0, 1.0, 1.0, 1.0])
                         .with_scale(40.0),
                 ],
                 ..Default::default()

@@ -21,5 +21,5 @@ var s_sampler: sampler;
 
 @fragment
 fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
-    return 0.5 + vec4<f32>(textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord, 0.5)).rgb * 10000.0, 1.0);
+    return vec4<f32>(textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord, 0.5)).rrr * 1000.0, 1.0);
 }
