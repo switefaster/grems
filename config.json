@@ -13,10 +13,12 @@
             1.0
         ]
     ],
-    "spatial_step": 0.05,
+    "spatial_step": 0.5,
     "temporal_step": 0.019625,
     "fps": 60,
-    "update_time_threshold": 0.5,
+    "default_slice_position": 0.5,
+    "default_slice_mode": "Z",
+    "default_shader": "shader/x_blit.wgsl",
     "sources": [
         {
             "wavelength": 1.256,

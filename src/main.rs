@@ -14,7 +14,9 @@ struct FDTDSettings {
     spatial_step: f32,
     temporal_step: f32,
     fps: f32,
-    update_time_threshold: f32,
+    default_slice_position: f32,
+    default_slice_mode: fdtd::SliceMode,
+    default_shader: String,
     gltfs: Vec<GLTFSettings>,
     sources: Vec<SourceSettings>,
 }
@@ -101,19 +103,23 @@ fn main() -> anyhow::Result<()> {
 
     let settings: FDTDSettings = settings.try_deserialize()?;
 
-    let fdtd = fdtd::FDTD::new(
+    let mut fdtd = fdtd::FDTD::new(
         &device,
         &queue,
         settings.spatial_step,
         settings.temporal_step * 1e-6 / physical_constants::SPEED_OF_LIGHT_IN_VACUUM as f32,
         settings.domain,
         settings.gltfs,
+        settings.default_slice_position,
+        settings.default_slice_mode,
+        &settings.default_shader,
     )?;
 
     let mut step_counter = 0;
     let mut now = std::time::Instant::now();
     let tau = std::time::Duration::from_secs_f32(1.0 / settings.fps);
     let mut elapsed = std::time::Duration::ZERO;
+    let mut paused = false;
     event_loop.run(move |event, _, control_flow| match event {
         winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
             match event {
@@ -137,6 +143,26 @@ fn main() -> anyhow::Result<()> {
                         surface.configure(&device, &surface_config);
                     }
                 }
+                winit::event::WindowEvent::MouseWheel { delta, .. } => match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, row) => {
+                        fdtd.offset_slice_position(row);
+                    }
+                    winit::event::MouseScrollDelta::PixelDelta(_) => unimplemented!(),
+                },
+                winit::event::WindowEvent::ReceivedCharacter(char) => {
+                    if char == ' ' {
+                        paused = !paused;
+                    } else if char == 'X' {
+                        fdtd.set_slice_mode(fdtd::SliceMode::X);
+                    } else if char == 'Y' {
+                        fdtd.set_slice_mode(fdtd::SliceMode::Y);
+                    } else if char == 'Z' {
+                        fdtd.set_slice_mode(fdtd::SliceMode::Z);
+                    }
+                }
+                winit::event::WindowEvent::DroppedFile(file) => {
+                    fdtd.reload_shader(file, &device).unwrap();
+                }
                 _ => (),
             }
         }
@@ -145,13 +171,14 @@ fn main() -> anyhow::Result<()> {
             let dt = now.elapsed();
             elapsed += dt;
             now = std::time::Instant::now();
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            if paused {
+                elapsed = std::time::Duration::ZERO;
+                return;
+            }
             while elapsed >= tau {
-                if elapsed >= std::time::Duration::from_secs_f32(settings.update_time_threshold) {
-                    elapsed = std::time::Duration::ZERO;
-                    break;
-                }
+                // UPDATE
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
                 elapsed -= tau;
                 fdtd.update_magnetic_field(&mut encoder);
                 fdtd.update_electric_field(&mut encoder);
@@ -209,70 +236,74 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
 
-                step_counter += 1;
-            }
+                // RENDER
+                let surface_texture = match surface.get_current_texture() {
+                    Ok(texture) => texture,
+                    Err(err) => match err {
+                        wgpu::SurfaceError::Timeout => {
+                            return;
+                        }
+                        wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+                            surface.configure(&device, &surface_config);
+                            return;
+                        }
+                        wgpu::SurfaceError::OutOfMemory => panic!("OUT OF MEMORY!"),
+                    },
+                };
+                let surf_texture_view = surface_texture
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
 
-            let surface_texture = match surface.get_current_texture() {
-                Ok(texture) => texture,
-                Err(err) => match err {
-                    wgpu::SurfaceError::Timeout => {
-                        return;
-                    }
-                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
-                        surface.configure(&device, &surface_config);
-                        return;
-                    }
-                    wgpu::SurfaceError::OutOfMemory => panic!("OUT OF MEMORY!"),
-                },
-            };
-            let surf_texture_view = surface_texture
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                {
+                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &surf_texture_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: true,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                    });
 
-            {
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &surf_texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
+                    fdtd.visualize(&mut render_pass);
+                }
+
+                glyph_brush.queue(wgpu_glyph::Section {
+                    screen_position: (0.0, 0.0),
+                    bounds: (surface_config.width as f32, surface_config.height as f32),
+                    text: vec![wgpu_glyph::Text::new(&format!(
+                        "Time step: {}, Slice position: {}, Slice mode: {:?}",
+                        step_counter,
+                        fdtd.get_slice_position(),
+                        fdtd.get_slice_mode(),
+                    ))
+                    .with_color([1.0, 1.0, 1.0, 1.0])
+                    .with_scale(40.0)],
+                    ..Default::default()
                 });
 
-                fdtd.visualize(&mut render_pass);
+                glyph_brush
+                    .draw_queued(
+                        &device,
+                        &mut staging_belt,
+                        &mut encoder,
+                        &surf_texture_view,
+                        surface_config.width,
+                        surface_config.height,
+                    )
+                    .unwrap();
+
+                staging_belt.finish();
+                queue.submit(std::iter::once(encoder.finish()));
+                device.poll(wgpu::Maintain::Wait);
+                surface_texture.present();
+                staging_belt.recall();
+
+                step_counter += 1;
             }
-
-            glyph_brush.queue(wgpu_glyph::Section {
-                screen_position: (0.0, 0.0),
-                bounds: (surface_config.width as f32, surface_config.height as f32),
-                text: vec![
-                    wgpu_glyph::Text::new(&format!("Time step: {}", step_counter))
-                        .with_color([1.0, 1.0, 1.0, 1.0])
-                        .with_scale(40.0),
-                ],
-                ..Default::default()
-            });
-
-            glyph_brush
-                .draw_queued(
-                    &device,
-                    &mut staging_belt,
-                    &mut encoder,
-                    &surf_texture_view,
-                    surface_config.width,
-                    surface_config.height,
-                )
-                .unwrap();
-
-            staging_belt.finish();
-            queue.submit(std::iter::once(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
-            surface_texture.present();
-            staging_belt.recall();
         }
         _ => (),
     });

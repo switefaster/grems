@@ -1,5 +1,12 @@
 use wgpu::util::DeviceExt;
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum SliceMode {
+    X = 2,
+    Y = 1,
+    Z = 0,
+}
+
 pub struct FDTD {
     electric_field_bind_group: wgpu::BindGroup,
     magnetic_field_bind_group: wgpu::BindGroup,
@@ -8,7 +15,12 @@ pub struct FDTD {
     excite_field_pipeline: wgpu::ComputePipeline,
     grid_dimension: [u32; 3],
 
+    slice_position: f32,
+    slice_mode: SliceMode,
+
     // visualize
+    vertex_shader: wgpu::ShaderModule,
+    render_pipeline_layout: wgpu::PipelineLayout,
     rect_vertices: wgpu::Buffer,
     electric_field_render_bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
@@ -22,6 +34,9 @@ impl FDTD {
         dt: f32, // seconds
         dimension: [[f32; 2]; 3],
         gltfs: Vec<crate::GLTFSettings>,
+        default_slice_position: f32,
+        default_slice_mode: SliceMode,
+        default_shader: &str,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             dimension[0][1] > dimension[0][0],
@@ -182,12 +197,15 @@ impl FDTD {
 
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FDTD Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(std::fs::read_to_string(
-                std::env::current_dir()?
-                    .join("shader")
-                    .join("fdtd")
-                    .join("fdtd-3d.wgsl"),
-            )?)),
+            source: wgpu::ShaderSource::Wgsl(
+                std::fs::read_to_string(
+                    std::env::current_dir()?
+                        .join("shader")
+                        .join("fdtd")
+                        .join("fdtd-3d.wgsl"),
+                )?
+                .into(),
+            ),
         });
 
         let update_magnetic_field_pipeline =
@@ -292,21 +310,34 @@ impl FDTD {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
                 bind_group_layouts: &[&electric_field_render_bind_group_layout],
-                push_constant_ranges: &[],
+                push_constant_ranges: &[{
+                    wgpu::PushConstantRange {
+                        stages: wgpu::ShaderStages::FRAGMENT,
+                        range: 0..8,
+                    }
+                }],
             });
 
+        let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(default_shader),
+            source: wgpu::ShaderSource::Wgsl(
+                std::fs::read_to_string(
+                    std::env::current_dir()?.join("shader").join("vertex.wgsl"),
+                )?
+                .into(),
+            ),
+        });
+
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(std::fs::read_to_string(
-                std::env::current_dir()?.join("shader").join("blit.wgsl"),
-            )?)),
+            label: Some(default_shader),
+            source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(default_shader)?.into()),
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader_module,
+                module: &vertex_shader,
                 entry_point: "vs_main",
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<crate::Vertex>() as _,
@@ -342,6 +373,10 @@ impl FDTD {
             electric_field_render_bind_group,
             render_pipeline,
             excite_field_pipeline,
+            slice_position: default_slice_position,
+            slice_mode: default_slice_mode,
+            vertex_shader,
+            render_pipeline_layout,
         })
     }
 
@@ -393,10 +428,88 @@ impl FDTD {
         );
     }
 
+    pub fn offset_slice_position(&mut self, row_delta: f32) {
+        self.slice_position += -row_delta
+            * (1.0
+                / match self.slice_mode {
+                    SliceMode::X => self.grid_dimension[0],
+                    SliceMode::Y => self.grid_dimension[1],
+                    SliceMode::Z => self.grid_dimension[2],
+                } as f32);
+        self.slice_position = self.slice_position.min(1.0).max(0.0);
+    }
+
+    pub fn set_slice_mode(&mut self, slice_mode: SliceMode) {
+        self.slice_mode = slice_mode;
+    }
+
+    pub fn get_slice_position(&self) -> f32 {
+        self.slice_position
+    }
+
+    pub fn get_slice_mode(&self) -> SliceMode {
+        self.slice_mode
+    }
+
+    pub fn reload_shader<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+        device: &wgpu::Device,
+    ) -> anyhow::Result<()> {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(path.as_ref().file_name().unwrap().to_str().unwrap()),
+            source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(path.as_ref())?.into()),
+        });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&self.render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &self.vertex_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::Vertex>() as _,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2
+                    ],
+                }],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+        });
+
+        self.render_pipeline = render_pipeline;
+
+        Ok(())
+    }
+
     pub fn visualize<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_vertex_buffer(0, self.rect_vertices.slice(..));
         render_pass.set_bind_group(0, &self.electric_field_render_bind_group, &[]);
+        render_pass.set_push_constants(
+            wgpu::ShaderStages::FRAGMENT,
+            0,
+            bytemuck::cast_slice(&[self.slice_position]),
+        );
+        render_pass.set_push_constants(
+            wgpu::ShaderStages::FRAGMENT,
+            4,
+            bytemuck::cast_slice(&[self.slice_mode as u32]),
+        );
         render_pass.draw(0..6, 0..1);
     }
 }
