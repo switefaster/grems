@@ -30,5 +30,5 @@ fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
     } else {
         discard;
     }
-    return vec4<f32>(1.0 + field.x, 1.0 - abs(field.x), 1.0 - field.x, 1.0);
+    return vec4<f32>(1.0 + field.y, 1.0 - abs(field.y), 1.0 - field.y, 1.0);
 }

@@ -13,7 +13,7 @@
             1.0
         ]
     ],
-    "spatial_step": 0.5,
+    "spatial_step": 0.05,
     "temporal_step": 0.019625,
     "fps": 60,
     "default_slice_position": 0.5,

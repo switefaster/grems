@@ -30,5 +30,6 @@ fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
     } else {
         discard;
     }
-    return vec4<f32>(1.0 + field.x, 1.0 - abs(field.x), 1.0 - field.x, 1.0);
+    var norm: f32 = length(field);
+    return vec4<f32>(norm, norm, norm, 1.0);
 }
