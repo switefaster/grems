@@ -6,7 +6,7 @@
     ],
     "spatial_step": 0.03,
     "temporal_step": 0.0157,
-    "steps_per_seconds_limit": 1000,
+    "steps_per_second_limit": 1000,
     "default_slice_position": 0,
     "default_slice_mode": "Z",
     "default_shader": "shader/x_blit.wgsl",

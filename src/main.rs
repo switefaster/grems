@@ -13,7 +13,7 @@ struct FDTDSettings {
     domain: [[f32; 2]; 3],
     spatial_step: f32,
     temporal_step: f32,
-    steps_per_seconds_limit: f32,
+    steps_per_second_limit: f32,
     default_slice_position: f32,
     default_slice_mode: fdtd::SliceMode,
     default_shader: String,
@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut step_counter = 0;
     let mut now = std::time::Instant::now();
-    let tau = std::time::Duration::from_secs_f32(1.0 / settings.steps_per_seconds_limit);
+    let tau = std::time::Duration::from_secs_f32(1.0 / settings.steps_per_second_limit);
     let mut elapsed = std::time::Duration::ZERO;
     let mut paused = false;
 
@@ -165,6 +165,10 @@ fn main() -> anyhow::Result<()> {
                         fdtd.set_slice_mode(fdtd::SliceMode::Y);
                     } else if char == 'Z' {
                         fdtd.set_slice_mode(fdtd::SliceMode::Z);
+                    } else if char == 'E' {
+                        fdtd.set_field_view_mode(fdtd::FieldViewMode::E);
+                    } else if char == 'H' {
+                        fdtd.set_field_view_mode(fdtd::FieldViewMode::H);
                     }
                 }
                 winit::event::WindowEvent::DroppedFile(file) => {
@@ -302,12 +306,13 @@ fn main() -> anyhow::Result<()> {
                 screen_position: (0.0, 0.0),
                 bounds: (surface_config.width as f32, surface_config.height as f32),
                 text: vec![wgpu_glyph::Text::new(&format!(
-                    "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}",
+                    "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}, field: {:?}",
                     step_counter,
                     step_counter as f32 * settings.temporal_step,
                     fps_counter,
                     fdtd.get_slice_mode(),
                     fdtd.get_slice_position(),
+                    fdtd.get_field_view_mode()
                 ))
                 .with_color([1.0, 0.0, 0.0, 1.0])
                 .with_scale(20.0)],
