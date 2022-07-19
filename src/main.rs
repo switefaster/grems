@@ -185,10 +185,6 @@ fn main() -> anyhow::Result<()> {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-
-            if paused {
-                elapsed = std::time::Duration::ZERO;
-            }
             let mut n = (elapsed.as_secs_f32() / tau.as_secs_f32()) as u32;
             if paused {
                 n = 0;

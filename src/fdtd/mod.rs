@@ -9,8 +9,8 @@ pub enum SliceMode {
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum FieldViewMode {
-    E = 0,
-    H = 1,
+    E,
+    H,
 }
 
 pub struct FDTD {
@@ -29,13 +29,11 @@ pub struct FDTD {
 
     // visualize
     vertex_shader: wgpu::ShaderModule,
-    electric_field_render_pipeline_layout: wgpu::PipelineLayout,
-    magnetic_field_render_pipeline_layout: wgpu::PipelineLayout,
+    render_pipeline_layout: wgpu::PipelineLayout,
     rect_vertices: wgpu::Buffer,
     electric_field_render_bind_group: wgpu::BindGroup,
     magnetic_field_render_bind_group: wgpu::BindGroup,
-    electric_field_render_pipeline: wgpu::RenderPipeline,
-    magnetic_field_render_pipeline: wgpu::RenderPipeline,
+    render_pipeline: wgpu::RenderPipeline,
 }
 
 impl FDTD {
@@ -303,7 +301,7 @@ impl FDTD {
                     },
                 ],
             });
-        
+
         let magnetic_field_render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: None,
@@ -344,7 +342,7 @@ impl FDTD {
                     },
                 ],
             });
-        
+
         let magnetic_field_render_bind_group =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
@@ -363,22 +361,10 @@ impl FDTD {
                 ],
             });
 
-        let electric_field_render_pipeline_layout =
+        let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
                 bind_group_layouts: &[&electric_field_render_bind_group_layout],
-                push_constant_ranges: &[{
-                    wgpu::PushConstantRange {
-                        stages: wgpu::ShaderStages::FRAGMENT,
-                        range: 0..8,
-                    }
-                }],
-            });
-        
-        let magnetic_field_render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&magnetic_field_render_bind_group_layout],
                 push_constant_ranges: &[{
                     wgpu::PushConstantRange {
                         stages: wgpu::ShaderStages::FRAGMENT,
@@ -402,39 +388,9 @@ impl FDTD {
             source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(default_shader)?.into()),
         });
 
-        let electric_field_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
-            layout: Some(&electric_field_render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vertex_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<crate::Vertex>() as _,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2
-                    ],
-                }],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
-
-        let magnetic_field_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&magnetic_field_render_pipeline_layout),
+            layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vertex_shader,
                 entry_point: "vs_main",
@@ -479,23 +435,25 @@ impl FDTD {
             rect_vertices,
             electric_field_render_bind_group,
             magnetic_field_render_bind_group,
-            electric_field_render_pipeline,
-            magnetic_field_render_pipeline,
+            render_pipeline,
             excite_field_pipeline,
-            slice_position: (default_slice_position + match default_slice_mode {
-                SliceMode::X => shift_vector[0],
-                SliceMode::Y => shift_vector[1],
-                SliceMode::Z => shift_vector[2],
-            } as f32 ) / (match default_slice_mode {
-                SliceMode::X => grid_x,
-                SliceMode::Y => grid_y,
-                SliceMode::Z => grid_z,
-            } as f32 - 1.0) / dx,
+            slice_position: (default_slice_position
+                + match default_slice_mode {
+                    SliceMode::X => shift_vector[0],
+                    SliceMode::Y => shift_vector[1],
+                    SliceMode::Z => shift_vector[2],
+                } as f32)
+                / (match default_slice_mode {
+                    SliceMode::X => grid_x,
+                    SliceMode::Y => grid_y,
+                    SliceMode::Z => grid_z,
+                } as f32
+                    - 1.0)
+                / dx,
             slice_mode: default_slice_mode,
             field_view_mode: FieldViewMode::E,
             vertex_shader,
-            electric_field_render_pipeline_layout,
-            magnetic_field_render_pipeline_layout,
+            render_pipeline_layout,
         })
     }
 
@@ -602,9 +560,9 @@ impl FDTD {
             source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(path.as_ref())?.into()),
         });
 
-        let electric_field_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
-            layout: Some(&self.electric_field_render_pipeline_layout),
+            layout: Some(&self.render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &self.vertex_shader,
                 entry_point: "vs_main",
@@ -632,47 +590,13 @@ impl FDTD {
             multiview: None,
         });
 
-        let magnetic_field_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&self.magnetic_field_render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &self.vertex_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<crate::Vertex>() as _,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2
-                    ],
-                }],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
-
-        self.electric_field_render_pipeline = electric_field_render_pipeline;
-        self.magnetic_field_render_pipeline = magnetic_field_render_pipeline;
+        self.render_pipeline = render_pipeline;
 
         Ok(())
     }
 
     pub fn visualize<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        render_pass.set_pipeline(match self.field_view_mode {
-            FieldViewMode::E => &self.electric_field_render_pipeline,
-            FieldViewMode::H => &self.magnetic_field_render_pipeline,
-        });
+        render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_vertex_buffer(0, self.rect_vertices.slice(..));
         render_pass.set_bind_group(
             0,
@@ -680,7 +604,7 @@ impl FDTD {
                 FieldViewMode::E => &self.electric_field_render_bind_group,
                 FieldViewMode::H => &self.magnetic_field_render_bind_group,
             },
-            &[]
+            &[],
         );
         render_pass.set_push_constants(
             wgpu::ShaderStages::FRAGMENT,
