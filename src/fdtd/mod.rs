@@ -14,6 +14,8 @@ pub struct FDTD {
     update_electric_field_pipeline: wgpu::ComputePipeline,
     excite_field_pipeline: wgpu::ComputePipeline,
     grid_dimension: [u32; 3],
+    shift_vector: nalgebra::Vector3<f32>,
+    spatial_step: f32,
 
     slice_position: f32,
     slice_mode: SliceMode,
@@ -33,7 +35,7 @@ impl FDTD {
         dx: f32, // micrometer
         dt: f32, // seconds
         dimension: [[f32; 2]; 3],
-        gltfs: Vec<crate::GLTFSettings>,
+        models: Vec<crate::ModelSettings>,
         default_slice_position: f32,
         default_slice_mode: SliceMode,
         default_shader: &str,
@@ -51,9 +53,13 @@ impl FDTD {
             "RHS of dimension[2] is less or equal then LHS!"
         );
 
-        let grid_x = ((dimension[0][1] - dimension[0][0]) / dx).ceil() as u32;
-        let grid_y = ((dimension[1][1] - dimension[1][0]) / dx).ceil() as u32;
-        let grid_z = ((dimension[2][1] - dimension[2][0]) / dx).ceil() as u32;
+        let step_x = (dimension[0][1] - dimension[0][0]) / dx;
+        let step_y = (dimension[1][1] - dimension[1][0]) / dx;
+        let step_z = (dimension[2][1] - dimension[2][0]) / dx;
+
+        let grid_x = step_x.floor() as u32 + 1;
+        let grid_y = step_y.floor() as u32 + 1;
+        let grid_z = step_z.floor() as u32 + 1;
 
         let common_texture_descriptor = wgpu::TextureDescriptor {
             label: None,
@@ -84,14 +90,14 @@ impl FDTD {
                 permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
             },
         );
-        for gltf in gltfs {
+        for model in models {
             importer.load_gltf(
-                &gltf.path,
-                gltf.scale,
-                gltf.position,
+                &model.path,
+                model.scale,
+                model.position,
                 gltf_importer::MaterialConstants {
                     permittivity: physical_constants::VACUUM_ELECTRIC_PERMITTIVITY as f32
-                        * (gltf.refractive_index * gltf.refractive_index),
+                        * (model.refractive_index * model.refractive_index),
                     permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
                 },
             )?;
@@ -363,17 +369,33 @@ impl FDTD {
             multiview: None,
         });
 
+        let shift_vector = -nalgebra::vector![
+            dimension[0][0] + (step_x - step_x.floor() as f32) * dx * 0.5,
+            dimension[1][0] + (step_y - step_y.floor() as f32) * dx * 0.5,
+            dimension[2][0] + (step_z - step_z.floor() as f32) * dx * 0.5
+        ];
+
         Ok(Self {
             electric_field_bind_group,
             magnetic_field_bind_group,
             update_magnetic_field_pipeline,
             update_electric_field_pipeline,
             grid_dimension: [grid_x, grid_y, grid_z],
+            shift_vector,
+            spatial_step: dx,
             rect_vertices,
             electric_field_render_bind_group,
             render_pipeline,
             excite_field_pipeline,
-            slice_position: default_slice_position,
+            slice_position: (default_slice_position + match default_slice_mode {
+                SliceMode::X => shift_vector[0],
+                SliceMode::Y => shift_vector[1],
+                SliceMode::Z => shift_vector[2],
+            } as f32 ) / (match default_slice_mode {
+                SliceMode::X => grid_x,
+                SliceMode::Y => grid_y,
+                SliceMode::Z => grid_z,
+            } as f32 - 1.0) / dx,
             slice_mode: default_slice_mode,
             vertex_shader,
             render_pipeline_layout,
@@ -432,9 +454,9 @@ impl FDTD {
         self.slice_position += -row_delta
             * (1.0
                 / match self.slice_mode {
-                    SliceMode::X => self.grid_dimension[0],
-                    SliceMode::Y => self.grid_dimension[1],
-                    SliceMode::Z => self.grid_dimension[2],
+                    SliceMode::X => self.grid_dimension[0] - 1,
+                    SliceMode::Y => self.grid_dimension[1] - 1,
+                    SliceMode::Z => self.grid_dimension[2] - 1,
                 } as f32);
         self.slice_position = self.slice_position.min(1.0).max(0.0);
     }
@@ -444,6 +466,20 @@ impl FDTD {
     }
 
     pub fn get_slice_position(&self) -> f32 {
+        let shift = match self.slice_mode {
+            SliceMode::X => self.shift_vector[0],
+            SliceMode::Y => self.shift_vector[1],
+            SliceMode::Z => self.shift_vector[2],
+        };
+        let dimension = match self.slice_mode {
+            SliceMode::X => self.grid_dimension[0],
+            SliceMode::Y => self.grid_dimension[1],
+            SliceMode::Z => self.grid_dimension[2],
+        } as f32;
+        self.slice_position * (dimension - 1.0) * self.spatial_step - shift
+    }
+
+    pub fn get_slice_position_normalized(&self) -> f32 {
         self.slice_position
     }
 
@@ -561,9 +597,12 @@ pub mod gltf_importer {
             dx: f32,
             background: MaterialConstants,
         ) -> Self {
-            let grid_x = ((dimension[0][1] - dimension[0][0]) / dx).ceil() as u32;
-            let grid_y = ((dimension[1][1] - dimension[1][0]) / dx).ceil() as u32;
-            let grid_z = ((dimension[2][1] - dimension[2][0]) / dx).ceil() as u32;
+            let step_x = (dimension[0][1] - dimension[0][0]) / dx;
+            let step_y = (dimension[1][1] - dimension[1][0]) / dx;
+            let step_z = (dimension[2][1] - dimension[2][0]) / dx;
+            let grid_x = step_x.floor() as u32 + 1;
+            let grid_y = step_y.floor() as u32 + 1;
+            let grid_z = step_z.floor() as u32 + 1;
 
             Self {
                 electric_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
@@ -583,7 +622,11 @@ pub mod gltf_importer {
                 grid_dimension: [grid_x, grid_y, grid_z],
                 dt,
                 dx,
-                shift_vector: -nalgebra::vector![dimension[0][0], dimension[1][0], dimension[2][0]],
+                shift_vector: -nalgebra::vector![
+                    dimension[0][0] + (step_x - step_x.floor() as f32) * dx * 0.5,
+                    dimension[1][0] + (step_y - step_y.floor() as f32) * dx * 0.5,
+                    dimension[2][0] + (step_z - step_z.floor() as f32) * dx * 0.5
+                ],
             }
         }
 
