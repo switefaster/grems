@@ -10,6 +10,7 @@
     "default_slice_position": 0,
     "default_slice_mode": "Z",
     "default_shader": "shader/x_blit.wgsl",
+    "default_scaling_factor": 10000,
     "pause_at": [
         {
             "type": "step",

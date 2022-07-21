@@ -26,6 +26,7 @@ pub struct FDTD {
     slice_position: f32,
     slice_mode: SliceMode,
     field_view_mode: FieldViewMode,
+    scaling_factor: f32,
 
     // visualize
     vertex_shader: wgpu::ShaderModule,
@@ -47,6 +48,7 @@ impl FDTD {
         default_slice_position: f32,
         default_slice_mode: SliceMode,
         default_shader: &str,
+        default_scaling_factor: f32,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             dimension[0][1] > dimension[0][0],
@@ -368,7 +370,7 @@ impl FDTD {
                 push_constant_ranges: &[{
                     wgpu::PushConstantRange {
                         stages: wgpu::ShaderStages::FRAGMENT,
-                        range: 0..8,
+                        range: 0..12,
                     }
                 }],
             });
@@ -454,6 +456,7 @@ impl FDTD {
             field_view_mode: FieldViewMode::E,
             vertex_shader,
             render_pipeline_layout,
+            scaling_factor: default_scaling_factor,
         })
     }
 
@@ -550,6 +553,19 @@ impl FDTD {
         self.field_view_mode
     }
 
+    pub fn get_scaling_factor(&self) -> f32 {
+        self.scaling_factor
+    }
+
+    pub fn scale_linear(&mut self, delta: f32) {
+        self.scaling_factor += delta;
+        self.scaling_factor = self.scaling_factor.max(0.0);
+    }
+
+    pub fn scale_exponential(&mut self, delta_exp: i32) {
+        self.scaling_factor *= 10f32.powi(delta_exp);
+    }
+
     pub fn reload_shader<P: AsRef<std::path::Path>>(
         &mut self,
         path: P,
@@ -609,12 +625,17 @@ impl FDTD {
         render_pass.set_push_constants(
             wgpu::ShaderStages::FRAGMENT,
             0,
-            bytemuck::cast_slice(&[self.slice_position]),
+            bytemuck::cast_slice(&[self.get_slice_position_normalized()]),
         );
         render_pass.set_push_constants(
             wgpu::ShaderStages::FRAGMENT,
             4,
             bytemuck::cast_slice(&[self.slice_mode as u32]),
+        );
+        render_pass.set_push_constants(
+            wgpu::ShaderStages::FRAGMENT,
+            8,
+            bytemuck::cast_slice(&[self.scaling_factor]),
         );
         render_pass.draw(0..6, 0..1);
     }

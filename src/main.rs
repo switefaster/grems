@@ -16,6 +16,7 @@ struct FDTDSettings {
     steps_per_second_limit: f32,
     default_slice_position: f32,
     default_slice_mode: fdtd::SliceMode,
+    default_scaling_factor: f32,
     default_shader: String,
     pause_at: Vec<TimingSettings>,
     models: Vec<ModelSettings>,
@@ -127,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         settings.default_slice_position,
         settings.default_slice_mode,
         &settings.default_shader,
+        settings.default_scaling_factor,
     )?;
 
     let mut step_counter = 0;
@@ -140,6 +142,8 @@ fn main() -> anyhow::Result<()> {
     let mut last_display_time = std::time::Instant::now();
     let mut fps_counter = 0f32;
     let show_fps_duration = std::time::Duration::from_secs_f32(1f32);
+
+    let mut ctrl_pressed = false;
 
     event_loop.run(move |event, _, control_flow| match event {
         winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
@@ -170,20 +174,45 @@ fn main() -> anyhow::Result<()> {
                     }
                     winit::event::MouseScrollDelta::PixelDelta(_) => unimplemented!(),
                 },
-                winit::event::WindowEvent::ReceivedCharacter(char) => {
-                    if char == ' ' {
+                winit::event::WindowEvent::KeyboardInput { input: winit::event::KeyboardInput {
+                    state: winit::event::ElementState::Pressed,
+                    virtual_keycode: Some(keycode),
+                    ..
+                }, .. } if ctrl_pressed => match keycode {
+                    winit::event::VirtualKeyCode::Space => {
                         paused = !paused;
-                    } else if char == 'X' {
+                    },
+                    winit::event::VirtualKeyCode::X => {
                         fdtd.set_slice_mode(fdtd::SliceMode::X);
-                    } else if char == 'Y' {
+                    },
+                    winit::event::VirtualKeyCode::Y => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Y);
-                    } else if char == 'Z' {
+                    },
+                    winit::event::VirtualKeyCode::Z => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Z);
-                    } else if char == 'E' {
+                    }
+                    winit::event::VirtualKeyCode::E => {
                         fdtd.set_field_view_mode(fdtd::FieldViewMode::E);
-                    } else if char == 'H' {
+                    }
+                    winit::event::VirtualKeyCode::H => {
                         fdtd.set_field_view_mode(fdtd::FieldViewMode::H);
                     }
+                    winit::event::VirtualKeyCode::Left => {
+                        fdtd.scale_linear(-1.0);
+                    }
+                    winit::event::VirtualKeyCode::Right => {
+                        fdtd.scale_linear(1.0);
+                    }
+                    winit::event::VirtualKeyCode::Up => {
+                        fdtd.scale_exponential(1);
+                    }
+                    winit::event::VirtualKeyCode::Down => {
+                        fdtd.scale_exponential(-1);
+                    }
+                    _ => (),
+                }
+                winit::event::WindowEvent::ModifiersChanged(modifiers) => {
+                    ctrl_pressed = modifiers.ctrl();
                 }
                 winit::event::WindowEvent::DroppedFile(file) => {
                     fdtd.reload_shader(file, &device).unwrap();
@@ -330,12 +359,13 @@ fn main() -> anyhow::Result<()> {
                 screen_position: (0.0, 0.0),
                 bounds: (surface_config.width as f32, surface_config.height as f32),
                 text: vec![wgpu_glyph::Text::new(&format!(
-                    "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}, field: {:?}",
+                    "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}, Scaling factor: {:.1}, field: {:?}",
                     step_counter,
                     step_counter as f32 * settings.temporal_step,
                     fps_counter,
                     fdtd.get_slice_mode(),
                     fdtd.get_slice_position(),
+                    fdtd.get_scaling_factor(),
                     fdtd.get_field_view_mode()
                 ))
                 .with_color([1.0, 0.0, 0.0, 1.0])

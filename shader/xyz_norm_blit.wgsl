@@ -1,6 +1,7 @@
 struct SliceParam {
     slice_position: f32,
     slice_mode: u32,
+    scaling_factor: f32,
 };
 
 var<push_constant> c_param: SliceParam;
@@ -22,11 +23,11 @@ var s_sampler: sampler;
 fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
     var field: vec3<f32>;
     if (c_param.slice_mode == 0u) {
-        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord, c_param.slice_position)).rgb * 100000.0;
+        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord, c_param.slice_position)).rgb * c_param.scaling_factor;
     } else if (c_param.slice_mode == 1u) {
-        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord.x, c_param.slice_position, fin.tex_coord.y)).rgb * 100000.0;
+        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord.x, c_param.slice_position, fin.tex_coord.y)).rgb * c_param.scaling_factor;
     } else if (c_param.slice_mode == 2u) {
-        field = textureSample(t_texture, s_sampler, vec3<f32>(c_param.slice_position, fin.tex_coord.x, fin.tex_coord.y)).rgb * 100000.0;
+        field = textureSample(t_texture, s_sampler, vec3<f32>(c_param.slice_position, fin.tex_coord.x, fin.tex_coord.y)).rgb * c_param.scaling_factor;
     } else {
         discard;
     }
