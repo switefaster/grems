@@ -14,13 +14,20 @@ struct FDTDSettings {
     spatial_step: f32,
     temporal_step: f32,
     steps_per_second_limit: f32,
-    default_slice_position: f32,
-    default_slice_mode: fdtd::SliceMode,
+    default_slice: SliceSettings,
     default_scaling_factor: f32,
     default_shader: String,
     pause_at: Vec<TimingSettings>,
+    exports: Vec<ExportSettings>,
     models: Vec<ModelSettings>,
     sources: Vec<SourceSettings>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct SliceSettings {
+    field: fdtd::FieldType,
+    mode: fdtd::SliceMode,
+    position: f32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -29,6 +36,19 @@ struct FDTDSettings {
 enum TimingSettings {
     Step(u32),
     Time(f32),
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportSettings {
+    timing: TimingSettings,
+    export: ExportFieldSettings,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "dimension", content = "settings")]
+enum ExportFieldSettings {
+    D3 { field: fdtd::FieldType },
+    D2(SliceSettings),
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -118,15 +138,19 @@ fn main() -> anyhow::Result<()> {
         TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
     });
 
+    settings.exports.sort_by_key(|v| match v.timing {
+        TimingSettings::Step(step) => step,
+        TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
+    });
+
     let mut fdtd = fdtd::FDTD::new(
         &device,
         &queue,
         settings.spatial_step,
-        settings.temporal_step * 1e-6 / physical_constants::SPEED_OF_LIGHT_IN_VACUUM as f32,
+        settings.temporal_step,
         settings.domain,
         settings.models,
-        settings.default_slice_position,
-        settings.default_slice_mode,
+        settings.default_slice,
         &settings.default_shader,
         settings.default_scaling_factor,
     )?;
@@ -156,6 +180,7 @@ fn main() -> anyhow::Result<()> {
                         surface_config.width = new_size.width;
                         surface_config.height = new_size.height;
                         surface.configure(&device, &surface_config);
+                        window.request_redraw();
                     }
                 }
                 winit::event::WindowEvent::ScaleFactorChanged {
@@ -166,11 +191,13 @@ fn main() -> anyhow::Result<()> {
                         surface_config.width = new_size.width;
                         surface_config.height = new_size.height;
                         surface.configure(&device, &surface_config);
+                        window.request_redraw();
                     }
                 }
                 winit::event::WindowEvent::MouseWheel { delta, .. } => match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, row) => {
                         fdtd.offset_slice_position(row);
+                        window.request_redraw();
                     }
                     winit::event::MouseScrollDelta::PixelDelta(_) => unimplemented!(),
                 },
@@ -184,30 +211,39 @@ fn main() -> anyhow::Result<()> {
                     },
                     winit::event::VirtualKeyCode::X => {
                         fdtd.set_slice_mode(fdtd::SliceMode::X);
+                        window.request_redraw();
                     },
                     winit::event::VirtualKeyCode::Y => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Y);
+                        window.request_redraw();
                     },
                     winit::event::VirtualKeyCode::Z => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Z);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::E => {
-                        fdtd.set_field_view_mode(fdtd::FieldViewMode::E);
+                        fdtd.set_field_view_mode(fdtd::FieldType::E);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::H => {
-                        fdtd.set_field_view_mode(fdtd::FieldViewMode::H);
+                        fdtd.set_field_view_mode(fdtd::FieldType::H);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::Left => {
                         fdtd.scale_linear(-1.0);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::Right => {
                         fdtd.scale_linear(1.0);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::Up => {
                         fdtd.scale_exponential(1);
+                        window.request_redraw();
                     }
                     winit::event::VirtualKeyCode::Down => {
                         fdtd.scale_exponential(-1);
+                        window.request_redraw();
                     }
                     _ => (),
                 }
@@ -216,11 +252,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 winit::event::WindowEvent::DroppedFile(file) => {
                     fdtd.reload_shader(file, &device).unwrap();
+                    window.request_redraw();
                 }
                 _ => (),
             }
         }
-        winit::event::Event::MainEventsCleared => window.request_redraw(),
+        winit::event::Event::MainEventsCleared => if !paused { window.request_redraw(); },
         winit::event::Event::RedrawRequested(_) => {
             let dt = now.elapsed();
             elapsed += dt;
@@ -309,6 +346,102 @@ fn main() -> anyhow::Result<()> {
                     if step == step_counter {
                         settings.pause_at.remove(0);
                         paused = true;
+                    } else {
+                        break;
+                    }
+                }
+
+                while let Some(export) = settings.exports.first() {
+                    let step = match export.timing {
+                        TimingSettings::Step(step) => step,
+                        TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
+                    };
+
+                    if step == step_counter {
+                        let mut export_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                        match export.export {
+                            ExportFieldSettings::D3 { field } => {
+                                let field_texture = match field {
+                                    fdtd::FieldType::E => fdtd.get_electric_field_texture().as_image_copy(),
+                                    fdtd::FieldType::H => fdtd.get_magnetic_field_texture().as_image_copy(),
+                                };
+
+                                let dimension = fdtd.get_dimension();
+
+                                let bytes_per_pixel = 4 * std::mem::size_of::<f32>() as u32;
+                                let unpadded_bytes_per_row = dimension[0] * bytes_per_pixel;
+                                let padded_bytes_per_row_padding = (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - unpadded_bytes_per_row % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                                let padded_bytes_per_row = unpadded_bytes_per_row + padded_bytes_per_row_padding;
+
+                                let copy_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: None,
+                                    size: (padded_bytes_per_row * dimension[1] * dimension[2]) as u64,
+                                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                                    mapped_at_creation: false,
+                                });
+
+                                export_encoder.copy_texture_to_buffer(field_texture,
+                                    wgpu::ImageCopyBufferBase {
+                                        buffer: &copy_buffer,
+                                        layout: wgpu::ImageDataLayout {
+                                            offset: 0,
+                                            bytes_per_row: std::num::NonZeroU32::new(padded_bytes_per_row),
+                                            rows_per_image: std::num::NonZeroU32::new(dimension[1])
+                                        }
+                                    },
+                                    wgpu::Extent3d {
+                                    width: dimension[0],
+                                    height: dimension[1],
+                                    depth_or_array_layers: dimension[2],
+                                });
+                                queue.submit(Some(export_encoder.finish()));
+
+                                let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+                                let map_slice = copy_buffer.slice(..);
+                                map_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+                                device.poll(wgpu::Maintain::Wait);
+
+                                if let Some(Ok(())) = pollster::block_on(receiver.receive()) {
+                                    {
+                                        let data = map_slice.get_mapped_range();
+                                        let raw_data: Vec<u8> = data.chunks(padded_bytes_per_row as usize)
+                                            .flat_map(|row| &row[..unpadded_bytes_per_row as usize])
+                                            .cloned()
+                                            .collect();
+
+                                        let mut dds = ddsfile::Dds::new_dxgi(ddsfile::NewDxgiParams {
+                                            height: dimension[1],
+                                            width: dimension[0],
+                                            depth: Some(dimension[2]),
+                                            format: ddsfile::DxgiFormat::R32G32B32A32_Float,
+                                            mipmap_levels: None,
+                                            array_layers: None,
+                                            caps2: None,
+                                            is_cubemap: false,
+                                            resource_dimension: ddsfile::D3D10ResourceDimension::Texture3D,
+                                            alpha_mode: ddsfile::AlphaMode::Unknown,
+                                        }).unwrap();
+
+                                        dds.data = raw_data;
+
+                                        let mut file = std::fs::OpenOptions::new()
+                                            .write(true)
+                                            .truncate(true)
+                                            .create(true)
+                                            .open(std::env::current_dir().unwrap().join(
+                                                format!("{}-D3-{:?}-{}.dds", options.preset, field ,step_counter)
+                                            ))
+                                            .unwrap();
+
+                                        dds.write(&mut file).unwrap();
+                                    }
+                                    copy_buffer.unmap();
+                                }
+
+                            },
+                            ExportFieldSettings::D2(ref _settings) => (),
+                        }
+                        settings.exports.remove(0);
                     } else {
                         break;
                     }

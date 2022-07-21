@@ -9,10 +9,10 @@ edition = "2021"
 wgpu = "0.13.1"
 anyhow = "1"
 pollster = "0.2.5"
+futures-intrusive = "0.4"
 winit = "0.26"
 argh = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
-physical_constants = "0.4.1"
 rayon = "1.5"
 gltf = "1.0"
 nalgebra = { version = "0.31", features = ["bytemuck"] }
@@ -20,6 +20,7 @@ ndarray = { version = "0.15.4" }
 config = "0.13"
 serde = { version = "1", features = ["derive"] }
 wgpu_glyph = "0.17"
+ddsfile = "0.5"
 
 [profile.release]
 lto = "fat"

@@ -7,10 +7,13 @@
     "spatial_step": 0.03,
     "temporal_step": 0.0157,
     "steps_per_second_limit": 1000,
-    "default_slice_position": 0,
-    "default_slice_mode": "Z",
+    "default_slice": {
+        "field": "E",
+        "mode": "Z",
+        "position": 0.0
+    },
     "default_shader": "shader/x_blit.wgsl",
-    "default_scaling_factor": 10000,
+    "default_scaling_factor": 100,
     "pause_at": [
         {
             "type": "step",
@@ -19,6 +22,34 @@
         {
             "type": "time",
             "value": 0.0157
+        }
+    ],
+    "exports": [
+        {
+            "timing": {
+                "type": "step",
+                "value": 157
+            },
+            "export": {
+                "dimension": "D3",
+                "settings": {
+                    "field": "E"
+                }
+            }
+        },
+        {
+            "timing": {
+                "type": "step",
+                "value": 157
+            },
+            "export": {
+                "dimension": "D2",
+                "settings": {
+                    "field": "E",
+                    "mode": "Z",
+                    "position": 0.0
+                }
+            }
         }
     ],
     "sources": [

@@ -8,14 +8,16 @@ pub enum SliceMode {
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub enum FieldViewMode {
+pub enum FieldType {
     E,
     H,
 }
 
 pub struct FDTD {
     electric_field_bind_group: wgpu::BindGroup,
+    electric_field_texture: wgpu::Texture,
     magnetic_field_bind_group: wgpu::BindGroup,
+    magnetic_field_texture: wgpu::Texture,
     update_magnetic_field_pipeline: wgpu::ComputePipeline,
     update_electric_field_pipeline: wgpu::ComputePipeline,
     excite_field_pipeline: wgpu::ComputePipeline,
@@ -25,7 +27,7 @@ pub struct FDTD {
 
     slice_position: f32,
     slice_mode: SliceMode,
-    field_view_mode: FieldViewMode,
+    field_view_mode: FieldType,
     scaling_factor: f32,
 
     // visualize
@@ -45,8 +47,7 @@ impl FDTD {
         dt: f32, // seconds
         dimension: [[f32; 2]; 3],
         models: Vec<crate::ModelSettings>,
-        default_slice_position: f32,
-        default_slice_mode: SliceMode,
+        default_slice: crate::SliceSettings,
         default_shader: &str,
         default_scaling_factor: f32,
     ) -> anyhow::Result<Self> {
@@ -82,7 +83,9 @@ impl FDTD {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
         };
         let electric_field_texture = device.create_texture(&common_texture_descriptor);
         let electric_field_view =
@@ -96,8 +99,8 @@ impl FDTD {
             dt,
             dx,
             gltf_importer::MaterialConstants {
-                permittivity: physical_constants::VACUUM_ELECTRIC_PERMITTIVITY as _,
-                permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
+                permittivity: 1.0,
+                permeability: 1.0,
             },
         );
         for model in models {
@@ -106,9 +109,8 @@ impl FDTD {
                 model.scale,
                 model.position,
                 gltf_importer::MaterialConstants {
-                    permittivity: physical_constants::VACUUM_ELECTRIC_PERMITTIVITY as f32
-                        * (model.refractive_index * model.refractive_index),
-                    permeability: physical_constants::VACUUM_MAG_PERMEABILITY as _,
+                    permittivity: model.refractive_index * model.refractive_index,
+                    permeability: 1.0,
                 },
             )?;
         }
@@ -439,24 +441,26 @@ impl FDTD {
             magnetic_field_render_bind_group,
             render_pipeline,
             excite_field_pipeline,
-            slice_position: (default_slice_position
-                + match default_slice_mode {
+            slice_position: (default_slice.position
+                + match default_slice.mode {
                     SliceMode::X => shift_vector[0],
                     SliceMode::Y => shift_vector[1],
                     SliceMode::Z => shift_vector[2],
                 } as f32)
-                / (match default_slice_mode {
+                / (match default_slice.mode {
                     SliceMode::X => grid_x,
                     SliceMode::Y => grid_y,
                     SliceMode::Z => grid_z,
                 } as f32
                     - 1.0)
                 / dx,
-            slice_mode: default_slice_mode,
-            field_view_mode: FieldViewMode::E,
+            slice_mode: default_slice.mode,
+            field_view_mode: default_slice.field,
             vertex_shader,
             render_pipeline_layout,
             scaling_factor: default_scaling_factor,
+            electric_field_texture,
+            magnetic_field_texture,
         })
     }
 
@@ -545,11 +549,11 @@ impl FDTD {
         self.slice_mode
     }
 
-    pub fn set_field_view_mode(&mut self, field_view_mode: FieldViewMode) {
+    pub fn set_field_view_mode(&mut self, field_view_mode: FieldType) {
         self.field_view_mode = field_view_mode;
     }
 
-    pub fn get_field_view_mode(&self) -> FieldViewMode {
+    pub fn get_field_view_mode(&self) -> FieldType {
         self.field_view_mode
     }
 
@@ -564,6 +568,18 @@ impl FDTD {
 
     pub fn scale_exponential(&mut self, delta_exp: i32) {
         self.scaling_factor *= 10f32.powi(delta_exp);
+    }
+
+    pub fn get_electric_field_texture<'a>(&'a self) -> &'a wgpu::Texture {
+        &self.electric_field_texture
+    }
+
+    pub fn get_magnetic_field_texture<'a>(&'a self) -> &'a wgpu::Texture {
+        &self.magnetic_field_texture
+    }
+
+    pub fn get_dimension(&self) -> [u32; 3] {
+        self.grid_dimension
     }
 
     pub fn reload_shader<P: AsRef<std::path::Path>>(
@@ -617,8 +633,8 @@ impl FDTD {
         render_pass.set_bind_group(
             0,
             match self.field_view_mode {
-                FieldViewMode::E => &self.electric_field_render_bind_group,
-                FieldViewMode::H => &self.magnetic_field_render_bind_group,
+                FieldType::E => &self.electric_field_render_bind_group,
+                FieldType::H => &self.magnetic_field_render_bind_group,
             },
             &[],
         );
@@ -699,14 +715,14 @@ pub mod gltf_importer {
                 electric_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        -2.0 * dt / (dx * 1e-6 * (2.0 * background.permittivity)),
+                        -2.0 * dt / (dx * (2.0 * background.permittivity)),
                         -2.0 * dt / (2.0 * background.permittivity)
                     ],
                 )),
                 magnetic_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        -2.0 * dt / (dx * 1e-6 * (2.0 * background.permeability)),
+                        -2.0 * dt / (dx * (2.0 * background.permeability)),
                         -2.0 * dt / (2.0 * background.permeability)
                     ],
                 )),
@@ -743,7 +759,7 @@ pub mod gltf_importer {
                             &(nalgebra::Vector3::from(scale) / self.dx),
                         ),
                     &buffers,
-                    FDTDConstants::from_material(constants, self.dt, self.dx * 1e-6),
+                    FDTDConstants::from_material(constants, self.dt, self.dx),
                 );
             }
             Ok(())
