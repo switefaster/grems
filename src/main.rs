@@ -17,8 +17,17 @@ struct FDTDSettings {
     default_slice_position: f32,
     default_slice_mode: fdtd::SliceMode,
     default_shader: String,
+    pause_at: Vec<TimingSettings>,
     models: Vec<ModelSettings>,
     sources: Vec<SourceSettings>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
+enum TimingSettings {
+    Step(u32),
+    Time(f32),
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -101,7 +110,12 @@ fn main() -> anyhow::Result<()> {
         .add_source(config::File::with_name(&options.preset))
         .build()?;
 
-    let settings: FDTDSettings = settings.try_deserialize()?;
+    let mut settings: FDTDSettings = settings.try_deserialize()?;
+
+    settings.pause_at.sort_by_key(|v| match v {
+        TimingSettings::Step(step) => *step,
+        TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
+    });
 
     let mut fdtd = fdtd::FDTD::new(
         &device,
@@ -197,7 +211,7 @@ fn main() -> anyhow::Result<()> {
                 elapsed -= tau * n as u32;
             }
 
-            while n > 0 {
+            while n > 0 && !paused {
                 n -= 1;
                 fdtd.update_magnetic_field(&mut encoder);
                 fdtd.update_electric_field(&mut encoder);
@@ -256,6 +270,20 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 step_counter += 1;
+
+                while let Some(timing) = settings.pause_at.first() {
+                    let step = match timing {
+                        TimingSettings::Step(step) => *step,
+                        TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
+                    };
+
+                    if step == step_counter {
+                        settings.pause_at.remove(0);
+                        paused = true;
+                    } else {
+                        break;
+                    }
+                }
             }
 
             let surface_texture = match surface.get_current_texture() {

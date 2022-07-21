@@ -10,6 +10,16 @@
     "default_slice_position": 0,
     "default_slice_mode": "Z",
     "default_shader": "shader/x_blit.wgsl",
+    "pause_at": [
+        {
+            "type": "step",
+            "value": 157
+        },
+        {
+            "type": "time",
+            "value": 0.0157
+        }
+    ],
     "sources": [
         {
             "wavelength": 1.256,
