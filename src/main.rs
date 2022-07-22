@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
                 _ => (),
             }
         }
-        winit::event::Event::MainEventsCleared => if !paused { window.request_redraw(); },
+        winit::event::Event::MainEventsCleared => if !paused { window.request_redraw(); } else { *control_flow = winit::event_loop::ControlFlow::Wait; },
         winit::event::Event::RedrawRequested(_) => {
             let dt = now.elapsed();
             elapsed += dt;
