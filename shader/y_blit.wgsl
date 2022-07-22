@@ -25,7 +25,7 @@ fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
     if (c_param.slice_mode == 0u) {
         field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord, c_param.slice_position)).rgb * c_param.scaling_factor;
     } else if (c_param.slice_mode == 1u) {
-        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord.x, c_param.slice_position, fin.tex_coord.y)).rgb * c_param.scaling_factor
+        field = textureSample(t_texture, s_sampler, vec3<f32>(fin.tex_coord.x, c_param.slice_position, fin.tex_coord.y)).rgb * c_param.scaling_factor;
     } else if (c_param.slice_mode == 2u) {
         field = textureSample(t_texture, s_sampler, vec3<f32>(c_param.slice_position, fin.tex_coord.x, fin.tex_coord.y)).rgb * c_param.scaling_factor;
     } else {
