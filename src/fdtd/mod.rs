@@ -15,9 +15,9 @@ pub enum FieldType {
 
 pub struct FDTD {
     electric_field_bind_group: wgpu::BindGroup,
-    electric_field_texture: wgpu::Texture,
+    electric_field_texture: [wgpu::Texture; 3],
     magnetic_field_bind_group: wgpu::BindGroup,
-    magnetic_field_texture: wgpu::Texture,
+    magnetic_field_texture: [wgpu::Texture; 3],
     update_magnetic_field_pipeline: wgpu::ComputePipeline,
     update_electric_field_pipeline: wgpu::ComputePipeline,
     excite_field_pipeline: wgpu::ComputePipeline,
@@ -82,17 +82,31 @@ impl FDTD {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::Rgba32Float,
+            format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
         };
-        let electric_field_texture = device.create_texture(&common_texture_descriptor);
-        let electric_field_view =
-            electric_field_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let magnetic_field_texture = device.create_texture(&common_texture_descriptor);
-        let magnetic_field_view =
-            magnetic_field_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let electric_field_texture = [
+            device.create_texture(&common_texture_descriptor),
+            device.create_texture(&common_texture_descriptor),
+            device.create_texture(&common_texture_descriptor),
+        ];
+        let electric_field_view = [
+            electric_field_texture[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            electric_field_texture[1].create_view(&wgpu::TextureViewDescriptor::default()),
+            electric_field_texture[2].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+        let magnetic_field_texture = [
+            device.create_texture(&common_texture_descriptor),
+            device.create_texture(&common_texture_descriptor),
+            device.create_texture(&common_texture_descriptor),
+        ];
+        let magnetic_field_view = [
+            magnetic_field_texture[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            magnetic_field_texture[1].create_view(&wgpu::TextureViewDescriptor::default()),
+            magnetic_field_texture[2].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
 
         let mut importer = gltf_importer::Importer::new(
             dimension,
@@ -127,7 +141,7 @@ impl FDTD {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::ReadWrite,
-                            format: wgpu::TextureFormat::Rgba32Float,
+                            format: wgpu::TextureFormat::R32Float,
                             view_dimension: wgpu::TextureViewDimension::D3,
                         },
                         count: None,
@@ -136,14 +150,54 @@ impl FDTD {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::ReadOnly,
-                            format: wgpu::TextureFormat::Rgba32Float,
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Float,
                             view_dimension: wgpu::TextureViewDimension::D3,
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::ReadOnly,
@@ -161,14 +215,30 @@ impl FDTD {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&electric_field_view),
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[0]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view),
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[1]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: wgpu::BindingResource::TextureView(&electric_constants_map),
                 },
             ],
@@ -180,14 +250,30 @@ impl FDTD {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view),
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[0]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&electric_field_view),
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[1]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&magnetic_field_view[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&electric_field_view[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: wgpu::BindingResource::TextureView(&magnetic_constants_map),
                 },
             ],
@@ -283,7 +369,7 @@ impl FDTD {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let electric_field_render_bind_group_layout =
+        let field_render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: None,
                 entries: &[
@@ -300,18 +386,15 @@ impl FDTD {
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
                         count: None,
                     },
-                ],
-            });
-
-        let magnetic_field_render_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &[
                     wgpu::BindGroupLayoutEntry {
-                        binding: 0,
+                        binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -321,7 +404,7 @@ impl FDTD {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
@@ -332,14 +415,22 @@ impl FDTD {
         let electric_field_render_bind_group =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &electric_field_render_bind_group_layout,
+                layout: &field_render_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&electric_field_view),
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[0]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
                         resource: wgpu::BindingResource::Sampler(
                             &device.create_sampler(&wgpu::SamplerDescriptor::default()),
                         ),
@@ -350,14 +441,22 @@ impl FDTD {
         let magnetic_field_render_bind_group =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &magnetic_field_render_bind_group_layout,
+                layout: &field_render_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view),
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[0]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
                         resource: wgpu::BindingResource::Sampler(
                             &device.create_sampler(&wgpu::SamplerDescriptor::default()),
                         ),
@@ -368,7 +467,7 @@ impl FDTD {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&electric_field_render_bind_group_layout],
+                bind_group_layouts: &[&field_render_bind_group_layout],
                 push_constant_ranges: &[{
                     wgpu::PushConstantRange {
                         stages: wgpu::ShaderStages::FRAGMENT,
@@ -570,11 +669,11 @@ impl FDTD {
         self.scaling_factor *= 10f32.powi(delta_exp);
     }
 
-    pub fn get_electric_field_texture<'a>(&'a self) -> &'a wgpu::Texture {
+    pub fn get_electric_field_textures<'a>(&'a self) -> &'a [wgpu::Texture; 3] {
         &self.electric_field_texture
     }
 
-    pub fn get_magnetic_field_texture<'a>(&'a self) -> &'a wgpu::Texture {
+    pub fn get_magnetic_field_textures<'a>(&'a self) -> &'a [wgpu::Texture; 3] {
         &self.magnetic_field_texture
     }
 

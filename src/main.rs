@@ -367,13 +367,13 @@ fn main() -> anyhow::Result<()> {
                         match export.export {
                             ExportFieldSettings::D3 { field } => {
                                 let field_texture = match field {
-                                    fdtd::FieldType::E => fdtd.get_electric_field_texture().as_image_copy(),
-                                    fdtd::FieldType::H => fdtd.get_magnetic_field_texture().as_image_copy(),
+                                    fdtd::FieldType::E => fdtd.get_electric_field_textures()[0].as_image_copy(),
+                                    fdtd::FieldType::H => fdtd.get_magnetic_field_textures()[0].as_image_copy(),
                                 };
 
                                 let dimension = fdtd.get_dimension();
 
-                                let bytes_per_pixel = 4 * std::mem::size_of::<f32>() as u32;
+                                let bytes_per_pixel = 1 * std::mem::size_of::<f32>() as u32;
                                 let unpadded_bytes_per_row = dimension[0] * bytes_per_pixel;
                                 let padded_bytes_per_row_padding = (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - unpadded_bytes_per_row % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
                                 let padded_bytes_per_row = unpadded_bytes_per_row + padded_bytes_per_row_padding;
@@ -418,7 +418,7 @@ fn main() -> anyhow::Result<()> {
                                             height: dimension[1],
                                             width: dimension[0],
                                             depth: Some(dimension[2]),
-                                            format: ddsfile::DxgiFormat::R32G32B32A32_Float,
+                                            format: ddsfile::DxgiFormat::R32_Float,
                                             mipmap_levels: None,
                                             array_layers: None,
                                             caps2: None,
@@ -444,7 +444,7 @@ fn main() -> anyhow::Result<()> {
                                 }
 
                             },
-                            ExportFieldSettings::D2(ref _settings) => (),
+                            ExportFieldSettings::D2(ref _settings) => eprintln!("2D Slice Not Yet Implemented"),
                         }
                         settings.exports.remove(0);
                     } else {
