@@ -53,15 +53,15 @@ impl FDTD {
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             dimension[0][1] > dimension[0][0],
-            "RHS of dimension[0] is less or equal then LHS!"
+            "RHS of dimension[0] is less or equal than LHS!"
         );
         anyhow::ensure!(
             dimension[1][1] > dimension[1][0],
-            "RHS of dimension[1] is less or equal then LHS!"
+            "RHS of dimension[1] is less or equal than LHS!"
         );
         anyhow::ensure!(
             dimension[2][1] > dimension[2][0],
-            "RHS of dimension[2] is less or equal then LHS!"
+            "RHS of dimension[2] is less or equal than LHS!"
         );
 
         let step_x = (dimension[0][1] - dimension[0][0]) / dx;
