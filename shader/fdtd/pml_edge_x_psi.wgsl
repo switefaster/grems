@@ -41,7 +41,7 @@ var constants_map: texture_storage_3d<rg32float, read>;
 
 @compute
 @workgroup_size(8, 8, 8)
-fn update_electric_psi_corner(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+fn update_electric_psi(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     if global_invocation_id.x < c_param.dimension.x && global_invocation_id.y < c_param.dimension.y && global_invocation_id.z < c_param.dimension.z {
         let pml_texel = vec3<i32>(global_invocation_id);
         let field_texel = vec3<i32>(global_invocation_id + c_param.offset);
@@ -75,7 +75,7 @@ fn update_electric_psi_corner(@builtin(global_invocation_id) global_invocation_i
 
 @compute
 @workgroup_size(8, 8, 8)
-fn update_magnetic_psi_corner(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+fn update_magnetic_psi(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     if global_invocation_id.x < c_param.dimension.x && global_invocation_id.y < c_param.dimension.y && global_invocation_id.z < c_param.dimension.z {
         let pml_texel = vec3<i32>(global_invocation_id);
         let field_texel = vec3<i32>(global_invocation_id + c_param.offset);
