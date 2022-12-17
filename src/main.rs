@@ -11,6 +11,7 @@ struct GremOptions {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct FDTDSettings {
     domain: [[f32; 2]; 3],
+    boundary: crate::fdtd::BoundaryCondition,
     spatial_step: f32,
     temporal_step: f32,
     steps_per_second_limit: f32,
@@ -97,13 +98,8 @@ fn main() -> anyhow::Result<()> {
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: None,
-            features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-                | wgpu::Features::PUSH_CONSTANTS,
-            limits: wgpu::Limits {
-                max_push_constant_size: 60,
-                max_compute_invocations_per_workgroup: 512,
-                ..Default::default()
-            },
+            features: adapter.features(),
+            limits: adapter.limits(),
         },
         None,
     ))?;
@@ -114,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         width: window.inner_size().width,
         height: window.inner_size().height,
         present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
     };
 
     surface.configure(&device, &surface_config);
@@ -150,6 +147,7 @@ fn main() -> anyhow::Result<()> {
         settings.temporal_step,
         settings.domain,
         settings.models,
+        settings.boundary,
         settings.default_slice,
         &settings.default_shader,
         settings.default_scaling_factor,
@@ -261,7 +259,7 @@ fn main() -> anyhow::Result<()> {
             window.request_redraw();
             *control_flow = winit::event_loop::ControlFlow::Poll;
         } else {
-            *control_flow = winit::event_loop::ControlFlow::Wait; 
+            *control_flow = winit::event_loop::ControlFlow::Wait;
         },
         winit::event::Event::RedrawRequested(_) => {
             let dt = now.elapsed();
@@ -306,13 +304,13 @@ fn main() -> anyhow::Result<()> {
                     let actual_position = [
                         ((source.position[0] - settings.domain[0][0] - source.size[0] / 2.0)
                             / settings.spatial_step)
-                            .ceil() as u32,
-                        ((source.position[1] - settings.domain[1][0] - source.size[1] / 2.0)
+                            .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                        ((source.position[1] - settings.domain[1][0] - source.size[1] / 2.0 )
                             / settings.spatial_step)
-                            .ceil() as u32,
+                            .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
                         ((source.position[2] - settings.domain[2][0] - source.size[2] / 2.0)
                             / settings.spatial_step)
-                            .ceil() as u32,
+                            .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
                     ];
                     let actual_size = [
                         if source.size[0] > 0.0 {

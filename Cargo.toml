@@ -6,20 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-wgpu = "0.13.1"
+wgpu = "0.14.2"
 anyhow = "1"
 pollster = "0.2.5"
-futures-intrusive = "0.4"
-winit = "0.26"
+futures-intrusive = "0.5.0"
+winit = "0.27.5"
 argh = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
-rayon = "1.5"
+rayon = "1.6.1"
 gltf = "1.0"
 nalgebra = { version = "0.31", features = ["bytemuck"] }
-ndarray = { version = "0.15.4" }
+ndarray = { version = "0.15.6" }
 config = "0.13"
 serde = { version = "1", features = ["derive"] }
-wgpu_glyph = "0.17"
+wgpu_glyph = "0.18.0"
 ddsfile = "0.5"
 
 [profile.release]

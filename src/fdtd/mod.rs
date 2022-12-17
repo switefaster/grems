@@ -1,4 +1,8 @@
+mod pml;
+
 use wgpu::util::DeviceExt;
+
+use self::pml::PMLBoundary;
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum SliceMode {
@@ -13,6 +17,22 @@ pub enum FieldType {
     H,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum BoundaryCondition {
+    PML { sigma: f32, cells: u32 },
+    PEC,
+}
+
+impl BoundaryCondition {
+    pub fn get_extra_grid_extent(&self) -> u32 {
+        match *self {
+            BoundaryCondition::PML { cells, .. } => cells * 2,
+            BoundaryCondition::PEC => 0,
+        }
+    }
+}
+
 pub struct FDTD {
     electric_field_bind_group: wgpu::BindGroup,
     electric_field_texture: [wgpu::Texture; 3],
@@ -24,6 +44,9 @@ pub struct FDTD {
     grid_dimension: [u32; 3],
     shift_vector: nalgebra::Vector3<f32>,
     spatial_step: f32,
+    temporal_step: f32,
+    boundary: BoundaryCondition,
+    pml: Option<PMLBoundary>,
 
     slice_position: f32,
     slice_mode: SliceMode,
@@ -43,10 +66,11 @@ impl FDTD {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        dx: f32, // micrometer
-        dt: f32, // seconds
+        dx: f32,
+        dt: f32,
         dimension: [[f32; 2]; 3],
         models: Vec<crate::ModelSettings>,
+        boundary: BoundaryCondition,
         default_slice: crate::SliceSettings,
         default_shader: &str,
         default_scaling_factor: f32,
@@ -68,9 +92,9 @@ impl FDTD {
         let step_y = (dimension[1][1] - dimension[1][0]) / dx;
         let step_z = (dimension[2][1] - dimension[2][0]) / dx;
 
-        let grid_x = step_x.floor() as u32 + 1;
-        let grid_y = step_y.floor() as u32 + 1;
-        let grid_z = step_z.floor() as u32 + 1;
+        let grid_x = step_x.floor() as u32 + 1 + boundary.get_extra_grid_extent();
+        let grid_y = step_y.floor() as u32 + 1 + boundary.get_extra_grid_extent();
+        let grid_z = step_z.floor() as u32 + 1 + boundary.get_extra_grid_extent();
 
         let common_texture_descriptor = wgpu::TextureDescriptor {
             label: None,
@@ -116,6 +140,7 @@ impl FDTD {
                 permittivity: 1.0,
                 permeability: 1.0,
             },
+            boundary.get_extra_grid_extent(),
         );
         for model in models {
             importer.load_gltf(
@@ -285,7 +310,7 @@ impl FDTD {
                 bind_group_layouts: &[&field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 0..12,
+                    range: 0..32,
                 }],
             });
 
@@ -295,7 +320,7 @@ impl FDTD {
                 bind_group_layouts: &[&field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 16..60,
+                    range: 32..76,
                 }],
             });
 
@@ -522,17 +547,42 @@ impl FDTD {
         });
 
         let shift_vector = -nalgebra::vector![
-            dimension[0][0] + (step_x - step_x.floor() as f32) * dx * 0.5,
-            dimension[1][0] + (step_y - step_y.floor() as f32) * dx * 0.5,
-            dimension[2][0] + (step_z - step_z.floor() as f32) * dx * 0.5
+            dimension[0][0] + (step_x - step_x.floor()) * dx * 0.5
+                - boundary.get_extra_grid_extent() as f32 * dx * 0.5,
+            dimension[1][0] + (step_y - step_y.floor()) * dx * 0.5
+                - boundary.get_extra_grid_extent() as f32 * dx * 0.5,
+            dimension[2][0] + (step_z - step_z.floor()) * dx * 0.5
+                - boundary.get_extra_grid_extent() as f32 * dx * 0.5
         ];
+
+        let grid_dimension = [grid_x, grid_y, grid_z];
+        let simulation_dimension = [
+            grid_x - boundary.get_extra_grid_extent(),
+            grid_y - boundary.get_extra_grid_extent(),
+            grid_z - boundary.get_extra_grid_extent(),
+        ];
+
+        let pml = match boundary {
+            BoundaryCondition::PML { cells, .. } => Some(PMLBoundary::new(
+                &device,
+                cells,
+                &electric_field_view,
+                &magnetic_field_view,
+                &electric_constants_map,
+                &magnetic_constants_map,
+                &field_bind_group_layout,
+                grid_dimension,
+                simulation_dimension,
+            )),
+            BoundaryCondition::PEC => None,
+        };
 
         Ok(Self {
             electric_field_bind_group,
             magnetic_field_bind_group,
             update_magnetic_field_pipeline,
             update_electric_field_pipeline,
-            grid_dimension: [grid_x, grid_y, grid_z],
+            grid_dimension,
             shift_vector,
             spatial_step: dx,
             rect_vertices,
@@ -560,14 +610,39 @@ impl FDTD {
             scaling_factor: default_scaling_factor,
             electric_field_texture,
             magnetic_field_texture,
+            boundary,
+            pml,
+            temporal_step: dt,
         })
     }
 
     pub fn update_magnetic_field(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        if let BoundaryCondition::PML { sigma, .. } = self.boundary {
+            let pml = self.pml.as_ref().unwrap();
+            pml.update_magnetic_field(
+                &mut cpass,
+                &self.magnetic_field_bind_group,
+                self.temporal_step,
+                sigma,
+            );
+        }
         cpass.set_pipeline(&self.update_magnetic_field_pipeline);
         cpass.set_bind_group(0, &self.magnetic_field_bind_group, &[]);
-        cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+        let extent = self.boundary.get_extra_grid_extent();
+        let simulation_dimension = [
+            self.grid_dimension[0] - extent,
+            self.grid_dimension[1] - extent,
+            self.grid_dimension[2] - extent,
+        ];
+        let offset = [extent / 2; 3];
+        cpass.set_push_constants(0, bytemuck::cast_slice(&simulation_dimension));
+        cpass.set_push_constants(16, bytemuck::cast_slice(&offset));
+        let pml_indicator = match self.boundary {
+            BoundaryCondition::PML { .. } => 1,
+            BoundaryCondition::PEC => 0,
+        };
+        cpass.set_push_constants(28, bytemuck::cast_slice(&[pml_indicator]));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -581,9 +656,31 @@ impl FDTD {
 
     pub fn update_electric_field(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        if let BoundaryCondition::PML { sigma, .. } = self.boundary {
+            let pml = self.pml.as_ref().unwrap();
+            pml.update_electric_field(
+                &mut cpass,
+                &self.electric_field_bind_group,
+                self.temporal_step,
+                sigma,
+            );
+        }
         cpass.set_pipeline(&self.update_electric_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+        let extent = self.boundary.get_extra_grid_extent();
+        let simulation_dimension = [
+            self.grid_dimension[0] - extent,
+            self.grid_dimension[1] - extent,
+            self.grid_dimension[2] - extent,
+        ];
+        let offset = [extent / 2; 3];
+        cpass.set_push_constants(0, bytemuck::cast_slice(&simulation_dimension));
+        cpass.set_push_constants(16, bytemuck::cast_slice(&offset));
+        let pml_indicator = match self.boundary {
+            BoundaryCondition::PML { .. } => 1,
+            BoundaryCondition::PEC => 0,
+        };
+        cpass.set_push_constants(28, bytemuck::cast_slice(&[pml_indicator]));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
             (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -601,9 +698,9 @@ impl FDTD {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&self.excite_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        cpass.set_push_constants(16, bytemuck::cast_slice(&position));
-        cpass.set_push_constants(32, bytemuck::cast_slice(&size));
-        cpass.set_push_constants(48, bytemuck::cast_slice(&strength));
+        cpass.set_push_constants(32, bytemuck::cast_slice(&position));
+        cpass.set_push_constants(48, bytemuck::cast_slice(&size));
+        cpass.set_push_constants(64, bytemuck::cast_slice(&strength));
         cpass.dispatch_workgroups(
             (size[0] as f32 / 8.0).ceil() as u32,
             (size[1] as f32 / 8.0).ceil() as u32,
@@ -780,9 +877,9 @@ pub mod gltf_importer {
 
     impl FDTDConstants {
         fn from_material(material: MaterialConstants, dt: f32, dx: f32) -> Self {
-            let ec3 = -2.0 * dt / (2.0 * material.permittivity);
+            let ec3 = dt / material.permittivity;
             let ec2 = ec3 / dx;
-            let hc3 = -2.0 * dt / (2.0 * material.permeability);
+            let hc3 = dt / material.permeability;
             let hc2 = hc3 / dx;
             Self { ec2, ec3, hc2, hc3 }
         }
@@ -802,36 +899,40 @@ pub mod gltf_importer {
             dt: f32,
             dx: f32,
             background: MaterialConstants,
+            extra_extent: u32,
         ) -> Self {
             let step_x = (dimension[0][1] - dimension[0][0]) / dx;
             let step_y = (dimension[1][1] - dimension[1][0]) / dx;
             let step_z = (dimension[2][1] - dimension[2][0]) / dx;
-            let grid_x = step_x.floor() as u32 + 1;
-            let grid_y = step_y.floor() as u32 + 1;
-            let grid_z = step_z.floor() as u32 + 1;
+            let grid_x = step_x.floor() as u32 + 1 + extra_extent;
+            let grid_y = step_y.floor() as u32 + 1 + extra_extent;
+            let grid_z = step_z.floor() as u32 + 1 + extra_extent;
 
             Self {
                 electric_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        -2.0 * dt / (dx * (2.0 * background.permittivity)),
-                        -2.0 * dt / (2.0 * background.permittivity)
+                        dt / (dx * background.permittivity),
+                        dt / background.permittivity
                     ],
                 )),
                 magnetic_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
                     nalgebra::vector![
-                        -2.0 * dt / (dx * (2.0 * background.permeability)),
-                        -2.0 * dt / (2.0 * background.permeability)
+                        dt / (dx * background.permeability),
+                        dt / background.permeability
                     ],
                 )),
                 grid_dimension: [grid_x, grid_y, grid_z],
                 dt,
                 dx,
                 shift_vector: -nalgebra::vector![
-                    dimension[0][0] + (step_x - step_x.floor() as f32) * dx * 0.5,
-                    dimension[1][0] + (step_y - step_y.floor() as f32) * dx * 0.5,
-                    dimension[2][0] + (step_z - step_z.floor() as f32) * dx * 0.5
+                    dimension[0][0] + (step_x - step_x.floor()) * dx * 0.5
+                        - extra_extent as f32 * dx * 0.5,
+                    dimension[1][0] + (step_y - step_y.floor()) * dx * 0.5
+                        - extra_extent as f32 * dx * 0.5,
+                    dimension[2][0] + (step_z - step_z.floor()) * dx * 0.5
+                        - extra_extent as f32 * dx * 0.5
                 ],
             }
         }
