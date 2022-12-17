@@ -6,8 +6,8 @@
     ],
     "boundary": {
         "type": "PML",
-        "sigma": 112.5,
-        "cells": 50
+        "sigma": 5,
+        "cells": 75
     },
     "spatial_step": 0.03,
     "temporal_step": 0.0157,
@@ -18,7 +18,7 @@
         "position": 0.0
     },
     "default_shader": "shader/xyz_norm_blit.wgsl",
-    "default_scaling_factor": 1000,
+    "default_scaling_factor": 100,
     "pause_at": [],
     "exports": [],
     "sources": [
@@ -30,7 +30,7 @@
             "phase": 90,
             "delay": 0,
             "fwhm": 0,
-            "power": 0.1
+            "power": 10
         }
     ],
     "models": []

@@ -70,8 +70,8 @@ fn update_magnetic_psi_surface(@builtin(global_invocation_id) global_invocation_
         }
         let constant = textureLoad(constants_map, field_texel).xy;
         let c = c_param.psi_constant - 1.0;
-        let new_psi_y_x = textureLoad(psi_y_x, pml_texel).x * c_param.psi_constant * constant.y - (local_e.z - e_shift_x_z) * constant.x * c;
-        let new_psi_z_x = textureLoad(psi_z_x, pml_texel).x * c_param.psi_constant * constant.y - (local_e.y - e_shift_x_y) * constant.x * c;
+        let new_psi_y_x = textureLoad(psi_y_x, pml_texel).x * c_param.psi_constant - (local_e.z - e_shift_x_z) * constant.x * c;
+        let new_psi_z_x = textureLoad(psi_z_x, pml_texel).x * c_param.psi_constant - (local_e.y - e_shift_x_y) * constant.x * c;
         textureStore(psi_y_x, pml_texel, vec4<f32>(new_psi_y_x, 0.0, 0.0, 1.0));
         textureStore(psi_z_x, pml_texel, vec4<f32>(new_psi_z_x, 0.0, 0.0, 1.0));
     }

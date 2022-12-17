@@ -62,10 +62,10 @@ fn update_electric_psi_corner(@builtin(global_invocation_id) global_invocation_i
         }
         let constant = textureLoad(constants_map, field_texel).xy;
         let c = c_param.psi_constant - 1.0;
-        let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant * constant.y + (local_h.z - h_shift_y_z) * constant.x * c;
-        let new_psi_x_z = textureLoad(psi_x_z, pml_texel).x * c_param.psi_constant * constant.y + (local_h.y - h_shift_z_y) * constant.x * c;
-        let new_psi_y_z = textureLoad(psi_y_z, pml_texel).x * c_param.psi_constant * constant.y + (local_h.x - h_shift_z_x) * constant.x * c;
-        let new_psi_z_y = textureLoad(psi_z_y, pml_texel).x * c_param.psi_constant * constant.y + (local_h.x - h_shift_y_x) * constant.x * c;
+        let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant + (local_h.z - h_shift_y_z) * constant.x * c;
+        let new_psi_x_z = textureLoad(psi_x_z, pml_texel).x * c_param.psi_constant + (local_h.y - h_shift_z_y) * constant.x * c;
+        let new_psi_y_z = textureLoad(psi_y_z, pml_texel).x * c_param.psi_constant + (local_h.x - h_shift_z_x) * constant.x * c;
+        let new_psi_z_y = textureLoad(psi_z_y, pml_texel).x * c_param.psi_constant + (local_h.x - h_shift_y_x) * constant.x * c;
         textureStore(psi_x_y, pml_texel, vec4<f32>(new_psi_x_y, 0.0, 0.0, 1.0));
         textureStore(psi_x_z, pml_texel, vec4<f32>(new_psi_x_z, 0.0, 0.0, 1.0));
         textureStore(psi_y_z, pml_texel, vec4<f32>(new_psi_y_z, 0.0, 0.0, 1.0));
@@ -96,10 +96,10 @@ fn update_magnetic_psi_corner(@builtin(global_invocation_id) global_invocation_i
         }
         let constant = textureLoad(constants_map, field_texel).xy;
         let c = c_param.psi_constant - 1.0;
-        let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant * constant.y - (local_e.z - e_shift_y_z) * constant.x * c;
-        let new_psi_x_z = textureLoad(psi_x_z, pml_texel).x * c_param.psi_constant * constant.y - (local_e.y - e_shift_z_y) * constant.x * c;
-        let new_psi_y_z = textureLoad(psi_y_z, pml_texel).x * c_param.psi_constant * constant.y - (local_e.x - e_shift_z_x) * constant.x * c;
-        let new_psi_z_y = textureLoad(psi_z_y, pml_texel).x * c_param.psi_constant * constant.y - (local_e.x - e_shift_y_x) * constant.x * c;
+        let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant - (local_e.z - e_shift_y_z) * constant.x * c;
+        let new_psi_x_z = textureLoad(psi_x_z, pml_texel).x * c_param.psi_constant - (local_e.y - e_shift_z_y) * constant.x * c;
+        let new_psi_y_z = textureLoad(psi_y_z, pml_texel).x * c_param.psi_constant - (local_e.x - e_shift_z_x) * constant.x * c;
+        let new_psi_z_y = textureLoad(psi_z_y, pml_texel).x * c_param.psi_constant - (local_e.x - e_shift_y_x) * constant.x * c;
         textureStore(psi_x_y, pml_texel, vec4<f32>(new_psi_x_y, 0.0, 0.0, 1.0));
         textureStore(psi_x_z, pml_texel, vec4<f32>(new_psi_x_z, 0.0, 0.0, 1.0));
         textureStore(psi_y_z, pml_texel, vec4<f32>(new_psi_y_z, 0.0, 0.0, 1.0));
