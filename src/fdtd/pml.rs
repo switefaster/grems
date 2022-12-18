@@ -296,6 +296,91 @@ impl PMLSurfaceY {
     }
 }
 
+pub struct PMLSurfaceZ {
+    pub(crate) psi_self_update_bind_group: wgpu::BindGroup,
+    pub(crate) psi_field_update_bind_group: wgpu::BindGroup,
+}
+
+impl PMLSurfaceZ {
+    pub fn new(
+        device: &wgpu::Device,
+        cells: u32,
+        simulation_dimension: [u32; 3],
+        field_view: &[wgpu::TextureView; 3],
+        constant_map: &wgpu::TextureView,
+        psi_self_update_bind_group_layout: &wgpu::BindGroupLayout,
+        psi_field_update_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let common_texture_descriptor = wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: simulation_dimension[0],
+                height: simulation_dimension[1],
+                depth_or_array_layers: cells,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
+        };
+        let psi_textures = [
+            device.create_texture(&common_texture_descriptor),
+            device.create_texture(&common_texture_descriptor),
+        ];
+        let psi_texture_views = [
+            psi_textures[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            psi_textures[1].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+
+        let psi_self_update_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: psi_self_update_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&psi_texture_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&psi_texture_views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&field_view[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&field_view[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(constant_map),
+                },
+            ],
+        });
+
+        let psi_field_update_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &psi_field_update_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&psi_texture_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&psi_texture_views[1]),
+                },
+            ],
+        });
+        Self {
+            psi_self_update_bind_group,
+            psi_field_update_bind_group,
+        }
+    }
+}
+
 pub struct PMLEdgeZ {
     pub(crate) psi_self_update_bind_group: wgpu::BindGroup,
     pub(crate) psi_field_update_bind_group: wgpu::BindGroup,
@@ -427,6 +512,12 @@ pub struct PMLBoundary {
     surface_y_self_update_pipeline_electric: wgpu::ComputePipeline,
     surface_y_field_update_pipeline_magnetic: wgpu::ComputePipeline,
     surface_y_field_update_pipeline_electric: wgpu::ComputePipeline,
+    surface_z_magnetic: [PMLSurfaceZ; 2],
+    surface_z_electric: [PMLSurfaceZ; 2],
+    surface_z_self_update_pipeline_magnetic: wgpu::ComputePipeline,
+    surface_z_self_update_pipeline_electric: wgpu::ComputePipeline,
+    surface_z_field_update_pipeline_magnetic: wgpu::ComputePipeline,
+    surface_z_field_update_pipeline_electric: wgpu::ComputePipeline,
     edge_z_magnetic: [PMLEdgeZ; 4],
     edge_z_electric: [PMLEdgeZ; 4],
     edge_z_self_update_pipeline_magnetic: wgpu::ComputePipeline,
@@ -939,6 +1030,70 @@ impl PMLBoundary {
                 entry_point: "update_electric_field",
             });
 
+        let surface_z_electric = [(); 2].map(|_| {
+            PMLSurfaceZ::new(
+                device,
+                cells,
+                simulation_dimension,
+                magnetic_field_view,
+                electric_constant_map,
+                &psi_surface_self_update_bind_group_layout,
+                &psi_surface_field_update_bind_group_layout,
+            )
+        });
+
+        let surface_z_magnetic = [(); 2].map(|_| {
+            PMLSurfaceZ::new(
+                device,
+                cells,
+                simulation_dimension,
+                electric_field_view,
+                magnetic_constant_map,
+                &psi_surface_self_update_bind_group_layout,
+                &psi_surface_field_update_bind_group_layout,
+            )
+        });
+
+        let surface_z_self_update_shader_module = device.create_shader_module(wgpu::include_wgsl!(
+            "../../shader/fdtd/pml_surface_z_psi.wgsl"
+        ));
+
+        let surface_z_self_update_pipeline_magnetic =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&surface_self_update_pipeline_layout),
+                module: &surface_z_self_update_shader_module,
+                entry_point: "update_magnetic_psi",
+            });
+
+        let surface_z_self_update_pipeline_electric =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&surface_self_update_pipeline_layout),
+                module: &surface_z_self_update_shader_module,
+                entry_point: "update_electric_psi",
+            });
+
+        let surface_z_field_update_shader_module = device.create_shader_module(
+            wgpu::include_wgsl!("../../shader/fdtd/pml_surface_z_field.wgsl"),
+        );
+
+        let surface_z_field_update_pipeline_magnetic =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&surface_field_update_pipeline_layout),
+                module: &surface_z_field_update_shader_module,
+                entry_point: "update_magnetic_field",
+            });
+
+        let surface_z_field_update_pipeline_electric =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&surface_field_update_pipeline_layout),
+                module: &surface_z_field_update_shader_module,
+                entry_point: "update_electric_field",
+            });
+
         // ------------------ PML EDGE -------------------
 
         let psi_edge_self_update_bind_group_layout =
@@ -1189,6 +1344,12 @@ impl PMLBoundary {
             edge_z_self_update_pipeline_electric,
             edge_z_field_update_pipeline_magnetic,
             edge_z_field_update_pipeline_electric,
+            surface_z_magnetic,
+            surface_z_electric,
+            surface_z_self_update_pipeline_magnetic,
+            surface_z_self_update_pipeline_electric,
+            surface_z_field_update_pipeline_magnetic,
+            surface_z_field_update_pipeline_electric,
         }
     }
 
@@ -1353,6 +1514,57 @@ impl PMLBoundary {
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[2] as f32 / 8.0).ceil() as u32,
+                );
+            });
+
+        self.surface_z_electric
+            .iter()
+            .enumerate()
+            .for_each(|(idx, surface)| {
+                cpass.set_pipeline(&self.surface_z_self_update_pipeline_electric);
+                cpass.set_bind_group(0, &surface.psi_self_update_bind_group, &[]);
+                cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+                cpass.set_push_constants(
+                    16,
+                    bytemuck::cast_slice(&[
+                        self.simulation_dimension[0],
+                        self.simulation_dimension[1],
+                        self.cells,
+                    ]),
+                );
+                let offset: [u32; 3] = match idx {
+                    0 => [self.cells, self.cells, 0],
+                    1 => [
+                        self.cells,
+                        self.cells,
+                        self.cells + self.simulation_dimension[2],
+                    ],
+                    _ => unreachable!(),
+                };
+                cpass.set_push_constants(32, bytemuck::cast_slice(&offset));
+                cpass.set_push_constants(44, bytemuck::cast_slice(&[b]));
+                cpass.dispatch_workgroups(
+                    (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
+                    (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
+                    (self.cells as f32 / 8.0).ceil() as u32,
+                );
+                cpass.set_pipeline(&self.surface_z_field_update_pipeline_electric);
+                cpass.set_bind_group(0, field_update_bind_group, &[]);
+                cpass.set_bind_group(1, &surface.psi_field_update_bind_group, &[]);
+                cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+                cpass.set_push_constants(
+                    16,
+                    bytemuck::cast_slice(&[
+                        self.simulation_dimension[0],
+                        self.simulation_dimension[1],
+                        self.cells,
+                    ]),
+                );
+                cpass.set_push_constants(32, bytemuck::cast_slice(&offset));
+                cpass.dispatch_workgroups(
+                    (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
+                    (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
+                    (self.cells as f32 / 8.0).ceil() as u32,
                 );
             });
 
@@ -1562,6 +1774,57 @@ impl PMLBoundary {
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[2] as f32 / 8.0).ceil() as u32,
+                );
+            });
+
+        self.surface_z_magnetic
+            .iter()
+            .enumerate()
+            .for_each(|(idx, surface)| {
+                cpass.set_pipeline(&self.surface_z_self_update_pipeline_magnetic);
+                cpass.set_bind_group(0, &surface.psi_self_update_bind_group, &[]);
+                cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+                cpass.set_push_constants(
+                    16,
+                    bytemuck::cast_slice(&[
+                        self.simulation_dimension[0],
+                        self.simulation_dimension[1],
+                        self.cells,
+                    ]),
+                );
+                let offset: [u32; 3] = match idx {
+                    0 => [self.cells, self.cells, 0],
+                    1 => [
+                        self.cells,
+                        self.cells,
+                        self.cells + self.simulation_dimension[2],
+                    ],
+                    _ => unreachable!(),
+                };
+                cpass.set_push_constants(32, bytemuck::cast_slice(&offset));
+                cpass.set_push_constants(44, bytemuck::cast_slice(&[b]));
+                cpass.dispatch_workgroups(
+                    (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
+                    (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
+                    (self.cells as f32 / 8.0).ceil() as u32,
+                );
+                cpass.set_pipeline(&self.surface_z_field_update_pipeline_magnetic);
+                cpass.set_bind_group(0, field_update_bind_group, &[]);
+                cpass.set_bind_group(1, &surface.psi_field_update_bind_group, &[]);
+                cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+                cpass.set_push_constants(
+                    16,
+                    bytemuck::cast_slice(&[
+                        self.simulation_dimension[0],
+                        self.simulation_dimension[1],
+                        self.cells,
+                    ]),
+                );
+                cpass.set_push_constants(32, bytemuck::cast_slice(&offset));
+                cpass.dispatch_workgroups(
+                    (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
+                    (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
+                    (self.cells as f32 / 8.0).ceil() as u32,
                 );
             });
 
