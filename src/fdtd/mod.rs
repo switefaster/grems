@@ -110,6 +110,7 @@ impl FDTD {
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
         };
         let electric_field_texture = [
             device.create_texture(&common_texture_descriptor),
@@ -982,6 +983,7 @@ pub mod gltf_importer {
                 dimension: wgpu::TextureDimension::D3,
                 format: wgpu::TextureFormat::Rg32Float,
                 usage: wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
             };
 
             let electric_constants_map = device

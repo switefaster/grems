@@ -7,7 +7,7 @@
     "boundary": {
         "type": "PML",
         "sigma": 10,
-        "cells": 75
+        "cells": 10
     },
     "spatial_step": 0.03,
     "temporal_step": 0.0157,
@@ -30,7 +30,7 @@
             "phase": 90,
             "delay": 0,
             "fwhm": 0,
-            "power": 10
+            "power": 1
         }
     ],
     "models": []

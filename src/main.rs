@@ -87,8 +87,8 @@ fn main() -> anyhow::Result<()> {
         .with_title("GREMS")
         .build(&event_loop)?;
 
-    let instance = wgpu::Instance::new(wgpu::Backends::PRIMARY);
-    let surface = unsafe { instance.create_surface(&window) };
+    let instance = wgpu::Instance::default();
+    let surface = unsafe { instance.create_surface(&window)? };
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
@@ -104,13 +104,16 @@ fn main() -> anyhow::Result<()> {
         None,
     ))?;
 
+    let caps = surface.get_capabilities(&adapter);
+
     let mut surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: surface.get_supported_formats(&adapter)[0],
+        format: caps.formats[0],
         width: window.inner_size().width,
         height: window.inner_size().height,
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![caps.formats[0]],
     };
 
     surface.configure(&device, &surface_config);
@@ -388,8 +391,8 @@ fn main() -> anyhow::Result<()> {
                                         buffer: &copy_buffer,
                                         layout: wgpu::ImageDataLayout {
                                             offset: 0,
-                                            bytes_per_row: std::num::NonZeroU32::new(padded_bytes_per_row),
-                                            rows_per_image: std::num::NonZeroU32::new(dimension[1])
+                                            bytes_per_row: Some(padded_bytes_per_row),
+                                            rows_per_image: Some(dimension[1])
                                         }
                                     },
                                     wgpu::Extent3d {

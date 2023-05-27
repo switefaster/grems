@@ -24,6 +24,7 @@ impl PMLCorner {
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         };
         let psi_textures = [
             device.create_texture(&common_texture_descriptor), // Ex/Hx - y
@@ -153,6 +154,7 @@ impl PMLSurfaceX {
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         };
         let psi_textures = [
             device.create_texture(&common_texture_descriptor),
@@ -238,6 +240,7 @@ impl PMLSurfaceY {
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         };
         let psi_textures = [
             device.create_texture(&common_texture_descriptor),
@@ -323,6 +326,7 @@ impl PMLSurfaceZ {
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         };
         let psi_textures = [
             device.create_texture(&common_texture_descriptor),
@@ -408,6 +412,7 @@ impl PMLEdgeZ {
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         };
         let psi_textures = [
             device.create_texture(&common_texture_descriptor),
