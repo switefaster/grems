@@ -146,6 +146,7 @@ fn main() -> anyhow::Result<()> {
     let mut fdtd = fdtd::FDTD::new(
         &device,
         &queue,
+        surface_config.format,
         settings.spatial_step,
         settings.temporal_step,
         settings.domain,
@@ -252,7 +253,7 @@ fn main() -> anyhow::Result<()> {
                     ctrl_pressed = modifiers.ctrl();
                 }
                 winit::event::WindowEvent::DroppedFile(file) => {
-                    fdtd.reload_shader(file, &device).unwrap();
+                    fdtd.reload_shader(file, &device, surface_config.format).unwrap();
                     window.request_redraw();
                 }
                 _ => (),

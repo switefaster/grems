@@ -66,6 +66,7 @@ impl FDTD {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        render_format: wgpu::TextureFormat,
         dx: f32,
         dt: f32,
         dimension: [[f32; 2]; 3],
@@ -539,7 +540,7 @@ impl FDTD {
                 module: &shader_module,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    format: render_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -783,6 +784,7 @@ impl FDTD {
         &mut self,
         path: P,
         device: &wgpu::Device,
+        render_format: wgpu::TextureFormat,
     ) -> anyhow::Result<()> {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(path.as_ref().file_name().unwrap().to_str().unwrap()),
@@ -811,7 +813,7 @@ impl FDTD {
                 module: &shader_module,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    format: render_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -859,7 +861,10 @@ pub mod gltf_importer {
     use std::path::Path;
 
     use ndarray::ShapeBuilder;
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+    use rayon::{
+        iter::{IntoParallelIterator, ParallelIterator},
+        prelude::ParallelBridge,
+    };
     use wgpu::util::DeviceExt;
 
     #[derive(Clone, Copy)]
@@ -890,8 +895,8 @@ pub mod gltf_importer {
         grid_dimension: [u32; 3],
         dt: f32,
         dx: f32,
-        electric_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector2<f32>>>,
-        magnetic_constants: std::sync::Mutex<ndarray::Array3<nalgebra::Vector2<f32>>>,
+        electric_constants: ndarray::Array3<std::sync::Mutex<nalgebra::Vector2<f32>>>,
+        magnetic_constants: ndarray::Array3<std::sync::Mutex<nalgebra::Vector2<f32>>>,
         shift_vector: nalgebra::Vector3<f32>,
     }
     impl Importer {
@@ -910,20 +915,24 @@ pub mod gltf_importer {
             let grid_z = step_z.floor() as u32 + 1 + extra_extent;
 
             Self {
-                electric_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
+                electric_constants: ndarray::Array3::from_shape_simple_fn(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
-                    nalgebra::vector![
-                        dt / (dx * background.permittivity),
-                        dt / background.permittivity
-                    ],
-                )),
-                magnetic_constants: std::sync::Mutex::new(ndarray::Array3::from_elem(
+                    || {
+                        std::sync::Mutex::new(nalgebra::vector![
+                            dt / (dx * background.permittivity),
+                            dt / background.permittivity
+                        ])
+                    },
+                ),
+                magnetic_constants: ndarray::Array3::from_shape_simple_fn(
                     (grid_x as usize, grid_y as usize, grid_z as usize).f(),
-                    nalgebra::vector![
-                        dt / (dx * background.permeability),
-                        dt / background.permeability
-                    ],
-                )),
+                    || {
+                        std::sync::Mutex::new(nalgebra::vector![
+                            dt / (dx * background.permeability),
+                            dt / background.permeability
+                        ])
+                    },
+                ),
                 grid_dimension: [grid_x, grid_y, grid_z],
                 dt,
                 dx,
@@ -991,9 +1000,9 @@ pub mod gltf_importer {
                     queue,
                     &common_desc,
                     bytemuck::cast_slice(
-                        self.electric_constants
-                            .lock()
-                            .unwrap()
+                        // why don't consume-map and Mutex::into_inner()? ndarray doesn't support that!
+                        ndarray::Zip::from(&self.electric_constants)
+                            .par_map_collect(|mutex| *mutex.lock().unwrap())
                             .as_slice_memory_order()
                             .unwrap(),
                     ),
@@ -1004,9 +1013,8 @@ pub mod gltf_importer {
                     queue,
                     &common_desc,
                     bytemuck::cast_slice(
-                        self.magnetic_constants
-                            .lock()
-                            .unwrap()
+                        ndarray::Zip::from(&self.magnetic_constants)
+                            .par_map_collect(|mutex| *mutex.lock().unwrap())
                             .as_slice_memory_order()
                             .unwrap(),
                     ),
@@ -1044,12 +1052,13 @@ pub mod gltf_importer {
                         })
                         .collect();
 
-                    let mut flag_map: ndarray::Array3<u8> = ndarray::Array3::zeros((
-                        self.grid_dimension[0] as usize,
-                        self.grid_dimension[1] as usize,
-                        self.grid_dimension[2] as usize,
-                    ));
-                    indices.chunks(3).for_each(|triangle| {
+                    let flag_map: ndarray::Array3<std::sync::Mutex<u8>> =
+                        ndarray::Array3::default((
+                            self.grid_dimension[0] as usize,
+                            self.grid_dimension[1] as usize,
+                            self.grid_dimension[2] as usize,
+                        ));
+                    indices.chunks(3).par_bridge().for_each(|triangle| {
                         let v0 = vertices[triangle[0] as usize];
                         let v1 = vertices[triangle[1] as usize];
                         let v2 = vertices[triangle[2] as usize];
@@ -1060,8 +1069,8 @@ pub mod gltf_importer {
                         let max_x = v0.x.max(v1.x.max(v2.x)).ceil() as u32;
                         let min_y = v0.y.min(v1.y.min(v2.y)).floor() as u32;
                         let max_y = v0.y.max(v1.y.max(v2.y)).ceil() as u32;
-                        (min_x..=max_x).for_each(|x| {
-                            (min_y..=max_y).for_each(|y| {
+                        (min_x..=max_x).into_par_iter().for_each(|x| {
+                            (min_y..=max_y).into_par_iter().for_each(|y| {
                                 let p = nalgebra::vector![x as f32, y as f32, 0.0];
                                 let denominator =
                                     nalgebra::Matrix3::from_columns(&[edge1, edge2, -ray])
@@ -1085,39 +1094,40 @@ pub mod gltf_importer {
                                         let x = h.x.round() as usize;
                                         let y = h.y.round() as usize;
                                         let z = h.z.round() as usize;
-                                        flag_map[[x, y, z]] = 1;
+                                        *flag_map[[x, y, z]].lock().unwrap() = 1;
                                     }
                                 }
                             })
                         });
                     });
 
-                    let accumulator: std::sync::Mutex<ndarray::Array3<u8>> =
-                        std::sync::Mutex::new(ndarray::Array3::zeros((
+                    let accumulator: ndarray::Array3<std::sync::RwLock<u8>> =
+                        ndarray::Array3::default((
                             self.grid_dimension[0] as usize,
                             self.grid_dimension[1] as usize,
                             self.grid_dimension[2] as usize,
-                        )));
+                        ));
 
                     (0..self.grid_dimension[2]).for_each(|z| {
                         (0..self.grid_dimension[0]).into_par_iter().for_each(|x| {
                             (0..self.grid_dimension[1]).into_par_iter().for_each(|y| {
-                                let mut acc_lock = accumulator.lock().unwrap();
                                 let idx_x = x as usize;
                                 let idx_y = y as usize;
                                 let idx_z = z as usize;
-                                acc_lock[[idx_x, idx_y, idx_z]] = flag_map[[idx_x, idx_y, idx_z]];
+                                let mut acc_write =
+                                    accumulator[[idx_x, idx_y, idx_z]].write().unwrap();
+                                *acc_write = *flag_map[[idx_x, idx_y, idx_z]].lock().unwrap();
                                 if z > 0 {
-                                    acc_lock[[idx_x, idx_y, idx_z]] +=
-                                        acc_lock[[idx_x, idx_y, idx_z - 1]];
+                                    *acc_write +=
+                                        *accumulator[[idx_x, idx_y, idx_z - 1]].read().unwrap();
                                 }
-                                if acc_lock[[idx_x, idx_y, idx_z]] % 2 == 1 {
-                                    self.electric_constants.lock().unwrap()
-                                        [[idx_x, idx_y, idx_z]] =
-                                        nalgebra::vector![constants.ec2, constants.ec3];
-                                    self.magnetic_constants.lock().unwrap()
-                                        [[idx_x, idx_y, idx_z]] =
-                                        nalgebra::vector![constants.hc2, constants.hc3];
+                                if *acc_write % 2 == 1 {
+                                    *self.electric_constants[[idx_x, idx_y, idx_z]]
+                                        .lock()
+                                        .unwrap() = nalgebra::vector![constants.ec2, constants.ec3];
+                                    *self.magnetic_constants[[idx_x, idx_y, idx_z]]
+                                        .lock()
+                                        .unwrap() = nalgebra::vector![constants.hc2, constants.hc3];
                                 }
                             });
                         })
