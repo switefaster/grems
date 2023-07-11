@@ -1101,7 +1101,7 @@ pub mod gltf_importer {
                         });
                     });
 
-                    let accumulator: ndarray::Array3<std::sync::RwLock<u8>> =
+                    let accumulator: ndarray::Array3<std::sync::Mutex<u8>> =
                         ndarray::Array3::default((
                             self.grid_dimension[0] as usize,
                             self.grid_dimension[1] as usize,
@@ -1115,11 +1115,11 @@ pub mod gltf_importer {
                                 let idx_y = y as usize;
                                 let idx_z = z as usize;
                                 let mut acc_write =
-                                    accumulator[[idx_x, idx_y, idx_z]].write().unwrap();
+                                    accumulator[[idx_x, idx_y, idx_z]].lock().unwrap();
                                 *acc_write = *flag_map[[idx_x, idx_y, idx_z]].lock().unwrap();
                                 if z > 0 {
                                     *acc_write +=
-                                        *accumulator[[idx_x, idx_y, idx_z - 1]].read().unwrap();
+                                        *accumulator[[idx_x, idx_y, idx_z - 1]].lock().unwrap();
                                 }
                                 if *acc_write % 2 == 1 {
                                     *self.electric_constants[[idx_x, idx_y, idx_z]]
