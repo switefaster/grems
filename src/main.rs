@@ -1,10 +1,14 @@
+use clap::Parser;
+use pollster::FutureExt;
+
 mod fdtd;
 
-#[derive(argh::FromArgs)]
-#[argh(description = "Gpu-accelerated Rusty Electro-Magnetic field Simulator options")]
+/// Gpu-accelerated Rusty Electro-Magnetic field Simulator
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
 struct GremOptions {
-    #[argh(positional)]
-    /// calculation preset file
+    #[arg(index = 1)]
+    /// Simulation preset file
     preset: String,
 }
 
@@ -80,7 +84,7 @@ struct Vertex {
 }
 
 fn main() -> anyhow::Result<()> {
-    let options: GremOptions = argh::from_env();
+    let options = GremOptions::parse();
 
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::WindowBuilder::new()
@@ -89,20 +93,24 @@ fn main() -> anyhow::Result<()> {
 
     let instance = wgpu::Instance::default();
     let surface = unsafe { instance.create_surface(&window)? };
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: Some(&surface),
-    }))
-    .unwrap();
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: None,
-            features: adapter.features(),
-            limits: adapter.limits(),
-        },
-        None,
-    ))?;
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        })
+        .block_on()
+        .unwrap();
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: None,
+                features: adapter.features(),
+                limits: adapter.limits(),
+            },
+            None,
+        )
+        .block_on()?;
 
     let caps = surface.get_capabilities(&adapter);
 
@@ -163,7 +171,6 @@ fn main() -> anyhow::Result<()> {
     let mut elapsed = std::time::Duration::ZERO;
     let mut paused = false;
 
-    let update_threshold = 10u32;
     let mut last_display_step = 0u32;
     let mut last_display_time = std::time::Instant::now();
     let mut fps_counter = 0f32;
@@ -210,6 +217,10 @@ fn main() -> anyhow::Result<()> {
                 }, .. } if ctrl_pressed => match keycode {
                     winit::event::VirtualKeyCode::Space => {
                         paused = !paused;
+                        if !paused {
+                            elapsed = std::time::Duration::ZERO;
+                            now = std::time::Instant::now();
+                        }
                     },
                     winit::event::VirtualKeyCode::X => {
                         fdtd.set_slice_mode(fdtd::SliceMode::X);
@@ -272,19 +283,16 @@ fn main() -> anyhow::Result<()> {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-            let mut n = (elapsed.as_secs_f32() / tau.as_secs_f32()) as u32;
+            let mut n = (elapsed.as_secs_f32() / tau.as_secs_f32()) as u32; // how many runs to compensate last lag
             if paused {
                 n = 0;
                 elapsed = std::time::Duration::ZERO;
             }
-            if n > update_threshold {
-                n = update_threshold;
-                elapsed = std::time::Duration::ZERO;
-            } else if n > 0 {
-                elapsed -= tau * n as u32;
-            }
+            elapsed -= tau * n;
 
+            let mut compensate_time = std::time::Duration::ZERO;
             while n > 0 && !paused {
+                let single_update_tracker = std::time::Instant::now();
                 n -= 1;
                 fdtd.update_magnetic_field(&mut encoder);
                 fdtd.update_electric_field(&mut encoder);
@@ -343,6 +351,8 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 step_counter += 1;
+
+                let single_update_time = single_update_tracker.elapsed();
 
                 while let Some(timing) = settings.pause_at.first() {
                     let step = match timing {
@@ -408,7 +418,7 @@ fn main() -> anyhow::Result<()> {
                                 map_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
                                 device.poll(wgpu::Maintain::Wait);
 
-                                if let Some(Ok(())) = pollster::block_on(receiver.receive()) {
+                                if let Some(Ok(())) = receiver.receive().block_on() {
                                     {
                                         let data = map_slice.get_mapped_range();
                                         let raw_data: Vec<u8> = data.chunks(padded_bytes_per_row as usize)
@@ -453,6 +463,12 @@ fn main() -> anyhow::Result<()> {
                         break;
                     }
                 }
+
+                compensate_time += single_update_time;
+                if compensate_time > tau { // compensating more will pile up more lag
+                    elapsed = std::time::Duration::ZERO; // don't count, unlikely to catch up
+                    break;
+                }
             }
 
             let surface_texture = match surface.get_current_texture() {
@@ -489,8 +505,9 @@ fn main() -> anyhow::Result<()> {
                 fdtd.visualize(&mut render_pass);
             }
 
-            if last_display_time.elapsed() >= show_fps_duration {
-                fps_counter = (step_counter - last_display_step) as f32 / last_display_time.elapsed().as_secs_f32();
+            let last_display_delta = last_display_time.elapsed();
+            if last_display_delta >= show_fps_duration {
+                fps_counter = (step_counter - last_display_step) as f32 / last_display_delta.as_secs_f32();
                 last_display_time = std::time::Instant::now();
                 last_display_step = step_counter;
             }
@@ -526,7 +543,6 @@ fn main() -> anyhow::Result<()> {
 
             staging_belt.finish();
             queue.submit(std::iter::once(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
             surface_texture.present();
             staging_belt.recall();
         }
