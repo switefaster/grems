@@ -7,14 +7,18 @@ mod fdtd;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct GremOptions {
-    #[arg(index = 1)]
+    #[arg(long)]
+    /// Print device infos and quit
+    info: bool,
+    #[arg(required_unless_present = "info")]
     /// Simulation preset file
-    preset: String,
+    preset: Option<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct FDTDSettings {
     domain: [[f32; 2]; 3],
+    workgroup: Option<WorkgroupSettings>, // this is kind of 'meta', maybe move it to another configs?
     boundary: crate::fdtd::BoundaryCondition,
     spatial_step: f32,
     temporal_step: f32,
@@ -26,6 +30,19 @@ struct FDTDSettings {
     exports: Vec<ExportSettings>,
     models: Vec<ModelSettings>,
     sources: Vec<SourceSettings>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct WorkgroupSettings {
+    x: u32,
+    y: u32,
+    z: u32,
+}
+
+impl WorkgroupSettings {
+    pub fn cache_volume(&self) -> u32 {
+        self.x * self.y * self.z
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -86,12 +103,33 @@ struct Vertex {
 fn main() -> anyhow::Result<()> {
     let options = GremOptions::parse();
 
+    if options.info {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .block_on()
+            .unwrap();
+        println!("Device: {:?}", adapter.get_info());
+        println!("{:?}", adapter.limits());
+        return Ok(());
+    }
+
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::WindowBuilder::new()
         .with_title("GREMS")
         .build(&event_loop)?;
 
-    let instance = wgpu::Instance::default();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
     let surface = unsafe { instance.create_surface(&window)? };
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -119,7 +157,7 @@ fn main() -> anyhow::Result<()> {
         format: caps.formats[0],
         width: window.inner_size().width,
         height: window.inner_size().height,
-        present_mode: wgpu::PresentMode::Fifo,
+        present_mode: wgpu::PresentMode::AutoNoVsync,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![caps.formats[0]],
     };
@@ -136,7 +174,7 @@ fn main() -> anyhow::Result<()> {
         wgpu_glyph::GlyphBrushBuilder::using_font(roboto).build(&device, surface_config.format);
 
     let settings = config::Config::builder()
-        .add_source(config::File::with_name(&options.preset))
+        .add_source(config::File::with_name(options.preset.as_ref().unwrap()))
         .build()?;
 
     let mut settings: FDTDSettings = settings.try_deserialize()?;
@@ -163,6 +201,15 @@ fn main() -> anyhow::Result<()> {
         settings.default_slice,
         &settings.default_shader,
         settings.default_scaling_factor,
+        settings.workgroup.unwrap_or({
+            let cell =
+                (adapter.limits().max_compute_invocations_per_workgroup as f32).cbrt() as u32;
+            WorkgroupSettings {
+                x: cell,
+                y: cell,
+                z: cell,
+            }
+        }),
     )?;
 
     let mut step_counter = 0;
@@ -330,13 +377,13 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             1
                         },
-                        if source.size[0] > 0.0 {
+                        if source.size[1] > 0.0 {
                             (source.size[1] / settings.spatial_step).ceil() as u32
                         } else {
                             1
                         },
-                        if source.size[0] > 0.0 {
-                            (source.size[1] / settings.spatial_step).ceil() as u32
+                        if source.size[2] > 0.0 {
+                            (source.size[2] / settings.spatial_step).ceil() as u32
                         } else {
                             1
                         },
@@ -446,7 +493,7 @@ fn main() -> anyhow::Result<()> {
                                             .truncate(true)
                                             .create(true)
                                             .open(std::env::current_dir().unwrap().join(
-                                                format!("{}-D3-{:?}-{}.dds", options.preset, field ,step_counter)
+                                                format!("{}-D3-{:?}-{}.dds", options.preset.as_ref().unwrap(), field ,step_counter)
                                             ))
                                             .unwrap();
 

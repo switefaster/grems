@@ -22,7 +22,15 @@ var psi_x_z: texture_storage_3d<r32float, read>;
 
 @group(1)
 @binding(1)
+var psi_y_x: texture_storage_3d<r32float, read>;
+
+@group(1)
+@binding(2)
 var psi_y_z: texture_storage_3d<r32float, read>;
+
+@group(1)
+@binding(3)
+var psi_z_x: texture_storage_3d<r32float, read>;
 
 @compute
 @workgroup_size(8, 8, 8)
@@ -31,8 +39,13 @@ fn update_magnetic_field(@builtin(global_invocation_id) global_invocation_id: ve
     let field_texel = vec3<i32>(global_invocation_id + c_param.offset);
     let prev_h = vec3<f32>(textureLoad(update_field_x, field_texel).x, textureLoad(update_field_y, field_texel).x, textureLoad(update_field_z, field_texel).x);
     let p_x_z = textureLoad(psi_x_z, pml_texel).x;
+    let p_y_x = textureLoad(psi_y_x, pml_texel).x;
     let p_y_z = textureLoad(psi_y_z, pml_texel).x;
-    let store_value = prev_h + vec3<f32>(p_x_z, -p_y_z, 0.0);
+    let p_z_x = textureLoad(psi_z_x, pml_texel).x;
+    let diff_psi_hx = p_x_z;
+    let diff_psi_hy = p_y_x - p_y_z;
+    let diff_psi_hz = -p_z_x;
+    let store_value = prev_h + vec3<f32>(diff_psi_hx, diff_psi_hy, diff_psi_hz);
 
     textureStore(update_field_x, field_texel, vec4<f32>(store_value.x, 0.0, 0.0, 1.0));
     textureStore(update_field_y, field_texel, vec4<f32>(store_value.y, 0.0, 0.0, 1.0));
@@ -46,8 +59,13 @@ fn update_electric_field(@builtin(global_invocation_id) global_invocation_id: ve
     let field_texel = vec3<i32>(global_invocation_id + c_param.offset);
     let prev_e = vec3<f32>(textureLoad(update_field_x, field_texel).x, textureLoad(update_field_y, field_texel).x, textureLoad(update_field_z, field_texel).x);
     let p_x_z = textureLoad(psi_x_z, pml_texel).x;
+    let p_y_x = textureLoad(psi_y_x, pml_texel).x;
     let p_y_z = textureLoad(psi_y_z, pml_texel).x;
-    let store_value = prev_e + vec3<f32>(-p_x_z, p_y_z, 0.0);
+    let p_z_x = textureLoad(psi_z_x, pml_texel).x;
+    let diff_psi_ex = -p_x_z;
+    let diff_psi_ey = p_y_z - p_y_x;
+    let diff_psi_ez = p_z_x;
+    let store_value = prev_e + vec3<f32>(diff_psi_ex, diff_psi_ey, diff_psi_ez);
 
     textureStore(update_field_x, field_texel, vec4<f32>(store_value.x, 0.0, 0.0, 1.0));
     textureStore(update_field_y, field_texel, vec4<f32>(store_value.y, 0.0, 0.0, 1.0));

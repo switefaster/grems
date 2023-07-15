@@ -19,7 +19,10 @@
     },
     "default_shader": "shader/xyz_norm_blit.wgsl",
     "default_scaling_factor": 100,
-    "pause_at": [],
+    "pause_at": [{
+        "type": "step",
+        "value": 500
+    }],
     "exports": [],
     "sources": [
         {

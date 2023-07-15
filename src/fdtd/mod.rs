@@ -34,6 +34,8 @@ impl BoundaryCondition {
 }
 
 pub struct FDTD {
+    workgroup_dispatch: crate::WorkgroupSettings,
+
     electric_field_bind_group: wgpu::BindGroup,
     electric_field_texture: [wgpu::Texture; 3],
     magnetic_field_bind_group: wgpu::BindGroup,
@@ -75,6 +77,7 @@ impl FDTD {
         default_slice: crate::SliceSettings,
         default_shader: &str,
         default_scaling_factor: f32,
+        workgroup_dispatch: crate::WorkgroupSettings,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             dimension[0][1] > dimension[0][0],
@@ -93,9 +96,9 @@ impl FDTD {
         let step_y = (dimension[1][1] - dimension[1][0]) / dx;
         let step_z = (dimension[2][1] - dimension[2][0]) / dx;
 
-        let grid_x = step_x.floor() as u32 + 1 + boundary.get_extra_grid_extent();
-        let grid_y = step_y.floor() as u32 + 1 + boundary.get_extra_grid_extent();
-        let grid_z = step_z.floor() as u32 + 1 + boundary.get_extra_grid_extent();
+        let grid_x = step_x.ceil() as u32 + boundary.get_extra_grid_extent();
+        let grid_y = step_y.ceil() as u32 + boundary.get_extra_grid_extent();
+        let grid_z = step_z.ceil() as u32 + boundary.get_extra_grid_extent();
 
         let common_texture_descriptor = wgpu::TextureDescriptor {
             label: None,
@@ -312,7 +315,7 @@ impl FDTD {
                 bind_group_layouts: &[&field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 0..32,
+                    range: 0..16,
                 }],
             });
 
@@ -322,21 +325,30 @@ impl FDTD {
                 bind_group_layouts: &[&field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 32..76,
+                    range: 16..60,
                 }],
             });
 
+        // naive preprocess
+        let macro_replaced = std::fs::read_to_string(
+            std::env::current_dir()?
+                .join("shader")
+                .join("fdtd")
+                .join("fdtd-3d.wgsl"),
+        )?
+        .replace("WORKGROUP_X", workgroup_dispatch.x.to_string().as_str())
+        .replace("WORKGROUP_Y", workgroup_dispatch.y.to_string().as_str())
+        .replace("WORKGROUP_Z", workgroup_dispatch.z.to_string().as_str())
+        .replace(
+            "CACHE_VOL",
+            workgroup_dispatch.cache_volume().to_string().as_str(),
+        );
+
+        let truncated = macro_replaced.split("// REMOVE").next().unwrap();
+
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FDTD Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                std::fs::read_to_string(
-                    std::env::current_dir()?
-                        .join("shader")
-                        .join("fdtd")
-                        .join("fdtd-3d.wgsl"),
-                )?
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(truncated.into()),
         });
 
         let update_magnetic_field_pipeline =
@@ -572,8 +584,6 @@ impl FDTD {
                 &magnetic_field_view,
                 &electric_constants_map,
                 &magnetic_constants_map,
-                &field_bind_group_layout,
-                grid_dimension,
                 simulation_dimension,
             )),
             BoundaryCondition::PEC => None,
@@ -615,6 +625,7 @@ impl FDTD {
             boundary,
             pml,
             temporal_step: dt,
+            workgroup_dispatch,
         })
     }
 
@@ -622,33 +633,16 @@ impl FDTD {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         if let BoundaryCondition::PML { sigma, .. } = self.boundary {
             let pml = self.pml.as_ref().unwrap();
-            pml.update_magnetic_field(
-                &mut cpass,
-                &self.magnetic_field_bind_group,
-                self.temporal_step,
-                sigma,
-            );
+            pml.update_magnetic_field(&mut cpass, self.temporal_step, sigma);
         }
         cpass.set_pipeline(&self.update_magnetic_field_pipeline);
         cpass.set_bind_group(0, &self.magnetic_field_bind_group, &[]);
-        let extent = self.boundary.get_extra_grid_extent();
-        let simulation_dimension = [
-            self.grid_dimension[0] - extent,
-            self.grid_dimension[1] - extent,
-            self.grid_dimension[2] - extent,
-        ];
-        let offset = [extent / 2; 3];
-        cpass.set_push_constants(0, bytemuck::cast_slice(&simulation_dimension));
-        cpass.set_push_constants(16, bytemuck::cast_slice(&offset));
-        let pml_indicator = match self.boundary {
-            BoundaryCondition::PML { .. } => 1,
-            BoundaryCondition::PEC => 0,
-        };
-        cpass.set_push_constants(28, bytemuck::cast_slice(&[pml_indicator]));
+        cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+        cpass.set_push_constants(12, bytemuck::cast_slice(&[1u32]));
         cpass.dispatch_workgroups(
-            (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
-            (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
-            (self.grid_dimension[2] as f32 / 8.0).ceil() as u32,
+            (self.grid_dimension[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
+            (self.grid_dimension[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
+            (self.grid_dimension[2] as f32 / self.workgroup_dispatch.z as f32).ceil() as u32,
         );
     }
 
@@ -660,33 +654,16 @@ impl FDTD {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         if let BoundaryCondition::PML { sigma, .. } = self.boundary {
             let pml = self.pml.as_ref().unwrap();
-            pml.update_electric_field(
-                &mut cpass,
-                &self.electric_field_bind_group,
-                self.temporal_step,
-                sigma,
-            );
+            pml.update_electric_field(&mut cpass, self.temporal_step, sigma);
         }
         cpass.set_pipeline(&self.update_electric_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        let extent = self.boundary.get_extra_grid_extent();
-        let simulation_dimension = [
-            self.grid_dimension[0] - extent,
-            self.grid_dimension[1] - extent,
-            self.grid_dimension[2] - extent,
-        ];
-        let offset = [extent / 2; 3];
-        cpass.set_push_constants(0, bytemuck::cast_slice(&simulation_dimension));
-        cpass.set_push_constants(16, bytemuck::cast_slice(&offset));
-        let pml_indicator = match self.boundary {
-            BoundaryCondition::PML { .. } => 1,
-            BoundaryCondition::PEC => 0,
-        };
-        cpass.set_push_constants(28, bytemuck::cast_slice(&[pml_indicator]));
+        cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
+        cpass.set_push_constants(12, bytemuck::cast_slice(&[1u32]));
         cpass.dispatch_workgroups(
-            (self.grid_dimension[0] as f32 / 8.0).ceil() as u32,
-            (self.grid_dimension[1] as f32 / 8.0).ceil() as u32,
-            (self.grid_dimension[2] as f32 / 8.0).ceil() as u32,
+            (self.grid_dimension[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
+            (self.grid_dimension[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
+            (self.grid_dimension[2] as f32 / self.workgroup_dispatch.z as f32).ceil() as u32,
         );
     }
 
@@ -700,13 +677,13 @@ impl FDTD {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&self.excite_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        cpass.set_push_constants(32, bytemuck::cast_slice(&position));
-        cpass.set_push_constants(48, bytemuck::cast_slice(&size));
-        cpass.set_push_constants(64, bytemuck::cast_slice(&strength));
+        cpass.set_push_constants(16, bytemuck::cast_slice(&position));
+        cpass.set_push_constants(32, bytemuck::cast_slice(&size));
+        cpass.set_push_constants(48, bytemuck::cast_slice(&strength));
         cpass.dispatch_workgroups(
-            (size[0] as f32 / 8.0).ceil() as u32,
-            (size[1] as f32 / 8.0).ceil() as u32,
-            (size[2] as f32 / 8.0).ceil() as u32,
+            (size[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
+            (size[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
+            (size[2] as f32 / self.workgroup_dispatch.z as f32).ceil() as u32,
         );
     }
 
@@ -910,9 +887,9 @@ pub mod gltf_importer {
             let step_x = (dimension[0][1] - dimension[0][0]) / dx;
             let step_y = (dimension[1][1] - dimension[1][0]) / dx;
             let step_z = (dimension[2][1] - dimension[2][0]) / dx;
-            let grid_x = step_x.floor() as u32 + 1 + extra_extent;
-            let grid_y = step_y.floor() as u32 + 1 + extra_extent;
-            let grid_z = step_z.floor() as u32 + 1 + extra_extent;
+            let grid_x = step_x.ceil() as u32 + extra_extent;
+            let grid_y = step_y.ceil() as u32 + extra_extent;
+            let grid_z = step_z.ceil() as u32 + extra_extent;
 
             Self {
                 electric_constants: ndarray::Array3::from_shape_simple_fn(

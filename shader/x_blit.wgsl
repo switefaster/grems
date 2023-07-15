@@ -1,3 +1,5 @@
+// should import VertexOut from vertex.wgsl, waiting for wgsl analyzer to support it
+
 struct SliceParam {
     slice_position: f32,
     slice_mode: u32,
@@ -30,11 +32,11 @@ var s_sampler: sampler;
 @fragment
 fn fs_main(fin: VertexOut) -> @location(0) vec4<f32> {
     var field: vec3<f32>;
-    if (c_param.slice_mode == 0u) {
+    if c_param.slice_mode == 0u {
         field = textureSample(t_texture_x, s_sampler, vec3<f32>(fin.tex_coord, c_param.slice_position)).rgb * c_param.scaling_factor;
-    } else if (c_param.slice_mode == 1u) {
+    } else if c_param.slice_mode == 1u {
         field = textureSample(t_texture_x, s_sampler, vec3<f32>(fin.tex_coord.x, c_param.slice_position, fin.tex_coord.y)).rgb * c_param.scaling_factor;
-    } else if (c_param.slice_mode == 2u) {
+    } else if c_param.slice_mode == 2u {
         field = textureSample(t_texture_x, s_sampler, vec3<f32>(c_param.slice_position, fin.tex_coord.x, fin.tex_coord.y)).rgb * c_param.scaling_factor;
     } else {
         discard;
