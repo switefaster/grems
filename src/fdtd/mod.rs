@@ -22,15 +22,32 @@ pub enum FieldType {
 pub enum BoundaryCondition {
     PML { sigma: f32, cells: u32 },
     PEC,
+    PMC,
 }
 
 impl BoundaryCondition {
     pub fn get_extra_grid_extent(&self) -> u32 {
         match *self {
             BoundaryCondition::PML { cells, .. } => cells * 2,
-            BoundaryCondition::PEC => 0,
+            BoundaryCondition::PEC | BoundaryCondition::PMC => 0,
         }
     }
+
+    pub fn use_pmc(&self) -> u32 {
+        match *self {
+            BoundaryCondition::PML { .. } | BoundaryCondition::PEC => 0,
+            BoundaryCondition::PMC => 1,
+        }
+    }
+}
+
+pub struct VisualizeComponent {
+    vertex_shader: wgpu::ShaderModule,
+    render_pipeline_layout: wgpu::PipelineLayout,
+    rect_vertices: wgpu::Buffer,
+    electric_field_render_bind_group: wgpu::BindGroup,
+    magnetic_field_render_bind_group: wgpu::BindGroup,
+    render_pipeline: wgpu::RenderPipeline,
 }
 
 pub struct FDTD {
@@ -56,19 +73,14 @@ pub struct FDTD {
     scaling_factor: f32,
 
     // visualize
-    vertex_shader: wgpu::ShaderModule,
-    render_pipeline_layout: wgpu::PipelineLayout,
-    rect_vertices: wgpu::Buffer,
-    electric_field_render_bind_group: wgpu::BindGroup,
-    magnetic_field_render_bind_group: wgpu::BindGroup,
-    render_pipeline: wgpu::RenderPipeline,
+    visualization: Option<VisualizeComponent>,
 }
 
 impl FDTD {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        render_format: wgpu::TextureFormat,
+        render_format: Option<wgpu::TextureFormat>,
         dx: f32,
         dt: f32,
         dimension: [[f32; 2]; 3],
@@ -375,190 +387,226 @@ impl FDTD {
                 entry_point: "excite_field",
             });
 
-        let rect = [
-            crate::Vertex {
-                pos: [-1.0, 1.0],
-                tex_coord: [0.0, 0.0],
-            },
-            crate::Vertex {
-                pos: [1.0, 1.0],
-                tex_coord: [1.0, 0.0],
-            },
-            crate::Vertex {
-                pos: [-1.0, -1.0],
-                tex_coord: [0.0, 1.0],
-            },
-            crate::Vertex {
-                pos: [1.0, 1.0],
-                tex_coord: [1.0, 0.0],
-            },
-            crate::Vertex {
-                pos: [-1.0, -1.0],
-                tex_coord: [0.0, 1.0],
-            },
-            crate::Vertex {
-                pos: [1.0, -1.0],
-                tex_coord: [1.0, 1.0],
-            },
-        ];
+        let visualization = render_format
+            .map::<anyhow::Result<VisualizeComponent>, _>(|render_format| {
+                let rect = [
+                    crate::Vertex {
+                        pos: [-1.0, 1.0],
+                        tex_coord: [0.0, 0.0],
+                    },
+                    crate::Vertex {
+                        pos: [1.0, 1.0],
+                        tex_coord: [1.0, 0.0],
+                    },
+                    crate::Vertex {
+                        pos: [-1.0, -1.0],
+                        tex_coord: [0.0, 1.0],
+                    },
+                    crate::Vertex {
+                        pos: [1.0, 1.0],
+                        tex_coord: [1.0, 0.0],
+                    },
+                    crate::Vertex {
+                        pos: [-1.0, -1.0],
+                        tex_coord: [0.0, 1.0],
+                    },
+                    crate::Vertex {
+                        pos: [1.0, -1.0],
+                        tex_coord: [1.0, 1.0],
+                    },
+                ];
 
-        let rect_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&rect),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+                let rect_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&rect),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
-        let field_render_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D3,
-                            multisampled: false,
+                let field_render_bind_group_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: false,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D3,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: false,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D3,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 2,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: false,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D3,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 3,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(
+                                    wgpu::SamplerBindingType::NonFiltering,
+                                ),
+                                count: None,
+                            },
+                        ],
+                    });
+
+                let electric_field_render_bind_group =
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &field_render_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &electric_field_view[0],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &electric_field_view[1],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &electric_field_view[2],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &device.create_sampler(&wgpu::SamplerDescriptor::default()),
+                                ),
+                            },
+                        ],
+                    });
+
+                let magnetic_field_render_bind_group =
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &field_render_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &magnetic_field_view[0],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &magnetic_field_view[1],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &magnetic_field_view[2],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &device.create_sampler(&wgpu::SamplerDescriptor::default()),
+                                ),
+                            },
+                        ],
+                    });
+
+                let render_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&field_render_bind_group_layout],
+                        push_constant_ranges: &[{
+                            wgpu::PushConstantRange {
+                                stages: wgpu::ShaderStages::FRAGMENT,
+                                range: 0..12,
+                            }
+                        }],
+                    });
+
+                let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(default_shader),
+                    source: wgpu::ShaderSource::Wgsl(
+                        std::fs::read_to_string(
+                            std::env::current_dir()?.join("shader").join("vertex.wgsl"),
+                        )?
+                        .into(),
+                    ),
+                });
+
+                let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(default_shader),
+                    source: wgpu::ShaderSource::Wgsl(
+                        std::fs::read_to_string(default_shader)?.into(),
+                    ),
+                });
+
+                let render_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: None,
+                        layout: Some(&render_pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &vertex_shader,
+                            entry_point: "vs_main",
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<crate::Vertex>() as _,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x2,
+                                    1 => Float32x2
+                                ],
+                            }],
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D3,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D3,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                        count: None,
-                    },
-                ],
-            });
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader_module,
+                            entry_point: "fs_main",
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: render_format,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        multiview: None,
+                    });
 
-        let electric_field_render_bind_group =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &field_render_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&electric_field_view[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&electric_field_view[1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&electric_field_view[2]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(
-                            &device.create_sampler(&wgpu::SamplerDescriptor::default()),
-                        ),
-                    },
-                ],
-            });
-
-        let magnetic_field_render_bind_group =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &field_render_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[2]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(
-                            &device.create_sampler(&wgpu::SamplerDescriptor::default()),
-                        ),
-                    },
-                ],
-            });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&field_render_bind_group_layout],
-                push_constant_ranges: &[{
-                    wgpu::PushConstantRange {
-                        stages: wgpu::ShaderStages::FRAGMENT,
-                        range: 0..12,
-                    }
-                }],
-            });
-
-        let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(default_shader),
-            source: wgpu::ShaderSource::Wgsl(
-                std::fs::read_to_string(
-                    std::env::current_dir()?.join("shader").join("vertex.wgsl"),
-                )?
-                .into(),
-            ),
-        });
-
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(default_shader),
-            source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(default_shader)?.into()),
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vertex_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<crate::Vertex>() as _,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2
-                    ],
-                }],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: render_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
+                Ok(VisualizeComponent {
+                    vertex_shader,
+                    render_pipeline_layout,
+                    rect_vertices,
+                    electric_field_render_bind_group,
+                    magnetic_field_render_bind_group,
+                    render_pipeline,
+                })
+            })
+            .transpose()?;
 
         let shift_vector = -nalgebra::vector![
             dimension[0][0] + (step_x - step_x.floor()) * dx * 0.5
@@ -586,7 +634,7 @@ impl FDTD {
                 &magnetic_constants_map,
                 simulation_dimension,
             )),
-            BoundaryCondition::PEC => None,
+            BoundaryCondition::PEC | BoundaryCondition::PMC => None,
         };
 
         Ok(Self {
@@ -597,10 +645,6 @@ impl FDTD {
             grid_dimension,
             shift_vector,
             spatial_step: dx,
-            rect_vertices,
-            electric_field_render_bind_group,
-            magnetic_field_render_bind_group,
-            render_pipeline,
             excite_field_pipeline,
             slice_position: (default_slice.position
                 + match default_slice.mode {
@@ -617,8 +661,6 @@ impl FDTD {
                 / dx,
             slice_mode: default_slice.mode,
             field_view_mode: default_slice.field,
-            vertex_shader,
-            render_pipeline_layout,
             scaling_factor: default_scaling_factor,
             electric_field_texture,
             magnetic_field_texture,
@@ -626,6 +668,7 @@ impl FDTD {
             pml,
             temporal_step: dt,
             workgroup_dispatch,
+            visualization,
         })
     }
 
@@ -638,7 +681,7 @@ impl FDTD {
         cpass.set_pipeline(&self.update_magnetic_field_pipeline);
         cpass.set_bind_group(0, &self.magnetic_field_bind_group, &[]);
         cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
-        cpass.set_push_constants(12, bytemuck::cast_slice(&[1u32]));
+        cpass.set_push_constants(12, bytemuck::cast_slice(&[self.boundary.use_pmc()]));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
             (self.grid_dimension[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
@@ -659,7 +702,7 @@ impl FDTD {
         cpass.set_pipeline(&self.update_electric_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
         cpass.set_push_constants(0, bytemuck::cast_slice(&self.grid_dimension));
-        cpass.set_push_constants(12, bytemuck::cast_slice(&[1u32]));
+        cpass.set_push_constants(12, bytemuck::cast_slice(&[self.boundary.use_pmc()]));
         cpass.dispatch_workgroups(
             (self.grid_dimension[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
             (self.grid_dimension[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
@@ -763,73 +806,77 @@ impl FDTD {
         device: &wgpu::Device,
         render_format: wgpu::TextureFormat,
     ) -> anyhow::Result<()> {
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(path.as_ref().file_name().unwrap().to_str().unwrap()),
-            source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(path.as_ref())?.into()),
-        });
+        if let Some(visualization) = &mut self.visualization {
+            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(path.as_ref().file_name().unwrap().to_str().unwrap()),
+                source: wgpu::ShaderSource::Wgsl(std::fs::read_to_string(path.as_ref())?.into()),
+            });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&self.render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &self.vertex_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<crate::Vertex>() as _,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2
-                    ],
-                }],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: render_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
+            let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&visualization.render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &visualization.vertex_shader,
+                    entry_point: "vs_main",
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<crate::Vertex>() as _,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x2,
+                            1 => Float32x2
+                        ],
+                    }],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_module,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: render_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview: None,
+            });
 
-        self.render_pipeline = render_pipeline;
+            visualization.render_pipeline = render_pipeline;
+        }
 
         Ok(())
     }
 
     pub fn visualize<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_vertex_buffer(0, self.rect_vertices.slice(..));
-        render_pass.set_bind_group(
-            0,
-            match self.field_view_mode {
-                FieldType::E => &self.electric_field_render_bind_group,
-                FieldType::H => &self.magnetic_field_render_bind_group,
-            },
-            &[],
-        );
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            0,
-            bytemuck::cast_slice(&[self.get_slice_position_normalized()]),
-        );
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            4,
-            bytemuck::cast_slice(&[self.slice_mode as u32]),
-        );
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            8,
-            bytemuck::cast_slice(&[self.scaling_factor]),
-        );
-        render_pass.draw(0..6, 0..1);
+        if let Some(visualization) = &self.visualization {
+            render_pass.set_pipeline(&visualization.render_pipeline);
+            render_pass.set_vertex_buffer(0, visualization.rect_vertices.slice(..));
+            render_pass.set_bind_group(
+                0,
+                match self.field_view_mode {
+                    FieldType::E => &visualization.electric_field_render_bind_group,
+                    FieldType::H => &visualization.magnetic_field_render_bind_group,
+                },
+                &[],
+            );
+            render_pass.set_push_constants(
+                wgpu::ShaderStages::FRAGMENT,
+                0,
+                bytemuck::cast_slice(&[self.get_slice_position_normalized()]),
+            );
+            render_pass.set_push_constants(
+                wgpu::ShaderStages::FRAGMENT,
+                4,
+                bytemuck::cast_slice(&[self.slice_mode as u32]),
+            );
+            render_pass.set_push_constants(
+                wgpu::ShaderStages::FRAGMENT,
+                8,
+                bytemuck::cast_slice(&[self.scaling_factor]),
+            );
+            render_pass.draw(0..6, 0..1);
+        }
     }
 }
 
