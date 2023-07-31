@@ -1,40 +1,60 @@
 {
     "domain": [
-        [-0.5, 0.5],
-        [-0.5, 0.5],
-        [-0.5, 0.5]
+        [-2.1, 2.1],
+        [-2.1, 2.1],
+        [-2.1, 2.1]
     ],
+    "workgroup": {
+        "x": 16,
+        "y": 8,
+        "z": 8
+    },
     "boundary": {
         "type": "PML",
-        "sigma": 10,
-        "cells": 10
+        "sigma": 30,
+        "alpha": 5,
+        "cells": 8
     },
-    "spatial_step": 0.03,
-    "temporal_step": 0.0157,
+    "spatial_step": 0.02,
+    "temporal_step": 0.01,
     "steps_per_second_limit": 1000,
     "default_slice": {
         "field": "E",
-        "mode": "Z",
+        "mode": "Y",
         "position": 0.0
     },
     "default_shader": "shader/xyz_norm_blit.wgsl",
     "default_scaling_factor": 100,
-    "pause_at": [{
-        "type": "step",
-        "value": 500
-    }],
+    "pause_at": [],
     "exports": [],
     "sources": [
         {
-            "wavelength": 1.256,
+            "wavelength": 1,
             "position": [0, 0, 0],
-            "size": [0, 0, 0],
-            "direction": [1, 0, 0],
-            "phase": 90,
-            "delay": 0,
-            "fwhm": 0,
-            "power": 1
+            "size": [1, 1, 1],
+            "mode": {
+                "type": "texture",
+                "settings": {
+                    "ex": "modes/fem_w1000_h200_index2p0_cw1000_ex.m00.csv",
+                    "ey": "modes/fem_w1000_h200_index2p0_cw1000_ey.m00.csv",
+                    "ez": "modes/fem_w1000_h200_index2p0_cw1000_ez.m00.csv",
+                    "hx": "modes/fem_w1000_h200_index2p0_cw1000_hx.m00.csv",
+                    "hy": "modes/fem_w1000_h200_index2p0_cw1000_hy.m00.csv",
+                    "hz": "modes/fem_w1000_h200_index2p0_cw1000_hz.m00.csv"
+                }
+            },
+            "phase": 0,
+            "delay": 5,
+            "fwhm": 0.5,
+            "power": 0.1
         }
     ],
-    "models": []
+    "models": [
+        {
+            "path": "models/slab_w1000_h200_l10000_rotx_90.glb",
+            "position": [0, 0, 0],
+            "scale": [1, 1, 1],
+            "refractive_index": 2
+        }
+    ]
 }

@@ -139,6 +139,7 @@ impl PMLSurfaceX {
         simulation_dimension: [u32; 3],
         field_view: &[wgpu::TextureView; 3],
         constant_map: &wgpu::TextureView,
+        psi_constant_map: &wgpu::TextureView,
         psi_self_update_bind_group_layout: &wgpu::BindGroupLayout,
         psi_field_update_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -189,6 +190,10 @@ impl PMLSurfaceX {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(constant_map),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(psi_constant_map),
+                },
             ],
         });
 
@@ -225,6 +230,7 @@ impl PMLSurfaceY {
         simulation_dimension: [u32; 3],
         field_view: &[wgpu::TextureView; 3],
         constant_map: &wgpu::TextureView,
+        psi_constant_map: &wgpu::TextureView,
         psi_self_update_bind_group_layout: &wgpu::BindGroupLayout,
         psi_field_update_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -275,6 +281,10 @@ impl PMLSurfaceY {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(constant_map),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(psi_constant_map),
+                },
             ],
         });
 
@@ -311,6 +321,7 @@ impl PMLSurfaceZ {
         simulation_dimension: [u32; 3],
         field_view: &[wgpu::TextureView; 3],
         constant_map: &wgpu::TextureView,
+        psi_constant_map: &wgpu::TextureView,
         psi_self_update_bind_group_layout: &wgpu::BindGroupLayout,
         psi_field_update_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -360,6 +371,10 @@ impl PMLSurfaceZ {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(constant_map),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(psi_constant_map),
                 },
             ],
         });
@@ -717,6 +732,8 @@ impl PMLEdgeZ {
 
 pub struct PMLBoundary {
     cells: u32,
+    alpha_factor: f32,
+    psi_constant: f32,
     simulation_dimension: [u32; 3],
     electric_field_update_bind_group: wgpu::BindGroup,
     magnetic_field_update_bind_group: wgpu::BindGroup,
@@ -768,11 +785,18 @@ impl PMLBoundary {
     pub fn new(
         device: &wgpu::Device,
         cells: u32,
+        alpha: f32,
+        sigma: f32,
+        dt: f32,
         electric_field_view: &[wgpu::TextureView; 3],
         magnetic_field_view: &[wgpu::TextureView; 3],
         electric_constant_map: &wgpu::TextureView,
         magnetic_constant_map: &wgpu::TextureView,
         simulation_dimension: [u32; 3],
+        (electric_psi_constants, magnetic_psi_constants): (
+            [wgpu::TextureView; 6],
+            [wgpu::TextureView; 6],
+        ),
     ) -> Self {
         let field_update_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1052,7 +1076,7 @@ impl PMLBoundary {
                 bind_group_layouts: &[&psi_corner_self_update_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 0..16,
+                    range: 0..20,
                 }],
             });
 
@@ -1163,6 +1187,16 @@ impl PMLBoundary {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -1192,25 +1226,27 @@ impl PMLBoundary {
                     },
                 ],
             });
-        let surface_x_electric = [(); 2].map(|_| {
+        let surface_x_electric = [0, 1].map(|idx| {
             PMLSurfaceX::new(
                 device,
                 cells,
                 simulation_dimension,
                 magnetic_field_view,
                 electric_constant_map,
+                &electric_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
         });
 
-        let surface_x_magnetic = [(); 2].map(|_| {
+        let surface_x_magnetic = [0, 1].map(|idx| {
             PMLSurfaceX::new(
                 device,
                 cells,
                 simulation_dimension,
                 electric_field_view,
                 magnetic_constant_map,
+                &magnetic_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
@@ -1222,7 +1258,7 @@ impl PMLBoundary {
                 bind_group_layouts: &[&psi_surface_self_update_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 0..16,
+                    range: 0..20,
                 }],
             });
 
@@ -1279,25 +1315,27 @@ impl PMLBoundary {
                 entry_point: "update_electric_field",
             });
 
-        let surface_y_electric = [(); 2].map(|_| {
+        let surface_y_electric = [2, 3].map(|idx| {
             PMLSurfaceY::new(
                 device,
                 cells,
                 simulation_dimension,
                 magnetic_field_view,
                 electric_constant_map,
+                &electric_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
         });
 
-        let surface_y_magnetic = [(); 2].map(|_| {
+        let surface_y_magnetic = [2, 3].map(|idx| {
             PMLSurfaceY::new(
                 device,
                 cells,
                 simulation_dimension,
                 electric_field_view,
                 magnetic_constant_map,
+                &magnetic_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
@@ -1343,25 +1381,27 @@ impl PMLBoundary {
                 entry_point: "update_electric_field",
             });
 
-        let surface_z_electric = [(); 2].map(|_| {
+        let surface_z_electric = [4, 5].map(|idx| {
             PMLSurfaceZ::new(
                 device,
                 cells,
                 simulation_dimension,
                 magnetic_field_view,
                 electric_constant_map,
+                &electric_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
         });
 
-        let surface_z_magnetic = [(); 2].map(|_| {
+        let surface_z_magnetic = [4, 5].map(|idx| {
             PMLSurfaceZ::new(
                 device,
                 cells,
                 simulation_dimension,
                 electric_field_view,
                 magnetic_constant_map,
+                &magnetic_psi_constants[idx],
                 &psi_surface_self_update_bind_group_layout,
                 &psi_surface_field_update_bind_group_layout,
             )
@@ -1549,7 +1589,7 @@ impl PMLBoundary {
                 bind_group_layouts: &[&psi_edge_self_update_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 0..16,
+                    range: 0..20,
                 }],
             });
 
@@ -1802,16 +1842,12 @@ impl PMLBoundary {
             edge_y_self_update_pipeline_electric,
             edge_y_field_update_pipeline_magnetic,
             edge_y_field_update_pipeline_electric,
+            alpha_factor: sigma / (sigma + alpha),
+            psi_constant: (-(sigma + alpha) * dt).exp(),
         }
     }
 
-    pub fn update_electric_field<'a>(
-        &'a self,
-        cpass: &mut wgpu::ComputePass<'a>,
-        dt: f32,
-        sigma: f32,
-    ) {
-        let b = (-sigma * dt).exp();
+    pub fn update_electric_field<'a>(&'a self, cpass: &mut wgpu::ComputePass<'a>) {
         self.corner_electric
             .iter()
             .enumerate()
@@ -1846,7 +1882,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -1879,7 +1918,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -1911,7 +1950,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -1944,7 +1983,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -1979,7 +2018,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -2014,7 +2056,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -2049,7 +2094,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -2067,13 +2115,7 @@ impl PMLBoundary {
             });
     }
 
-    pub fn update_magnetic_field<'a>(
-        &'a self,
-        cpass: &mut wgpu::ComputePass<'a>,
-        dt: f32,
-        sigma: f32,
-    ) {
-        let b = (-sigma * dt).exp();
+    pub fn update_magnetic_field<'a>(&'a self, cpass: &mut wgpu::ComputePass<'a>) {
         self.corner_magnetic
             .iter()
             .enumerate()
@@ -2108,7 +2150,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -2140,7 +2185,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -2172,7 +2217,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -2205,7 +2250,7 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(12, bytemuck::cast_slice(&[self.alpha_factor]));
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -2240,7 +2285,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.simulation_dimension[0] as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,
@@ -2275,7 +2323,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.simulation_dimension[1] as f32 / 8.0).ceil() as u32,
@@ -2310,7 +2361,10 @@ impl PMLBoundary {
                     _ => unreachable!(),
                 };
                 cpass.set_push_constants(0, bytemuck::cast_slice(&offset));
-                cpass.set_push_constants(12, bytemuck::cast_slice(&[b]));
+                cpass.set_push_constants(
+                    12,
+                    bytemuck::cast_slice(&[self.psi_constant, self.alpha_factor]),
+                );
                 cpass.dispatch_workgroups(
                     (self.cells as f32 / 8.0).ceil() as u32,
                     (self.cells as f32 / 8.0).ceil() as u32,

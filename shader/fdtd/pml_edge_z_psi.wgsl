@@ -1,6 +1,7 @@
 struct Param {
     offset: vec3<u32>,
-    psi_constant: f32 // b
+    psi_constant: f32, // b
+    alpha_factor: f32,
 }
 
 var<push_constant> c_param: Param;
@@ -50,7 +51,7 @@ fn update_electric_psi(@builtin(global_invocation_id) global_invocation_id: vec3
     let h_shift_y_x = textureLoad(field_x, y_actual_texel).x;
     let h_shift_y_z = textureLoad(field_z, y_actual_texel).x;
     let constant = textureLoad(constants_map, field_texel).xy;
-    let c = c_param.psi_constant - 1.0;
+    let c = (c_param.psi_constant - 1.0) * c_param.alpha_factor;
     let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant + (local_h.z - h_shift_y_z) * constant.x * c;
     let new_psi_y_x = textureLoad(psi_y_x, pml_texel).x * c_param.psi_constant + (local_h.z - h_shift_x_z) * constant.x * c;
     let new_psi_z_x = textureLoad(psi_z_x, pml_texel).x * c_param.psi_constant + (local_h.y - h_shift_x_y) * constant.x * c;
@@ -74,7 +75,7 @@ fn update_magnetic_psi(@builtin(global_invocation_id) global_invocation_id: vec3
     let e_shift_y_x = textureLoad(field_x, y_actual_texel).x;
     let e_shift_y_z = textureLoad(field_z, y_actual_texel).x;
     let constant = textureLoad(constants_map, field_texel).xy;
-    let c = c_param.psi_constant - 1.0;
+    let c = (c_param.psi_constant - 1.0) * c_param.alpha_factor;
     let new_psi_x_y = textureLoad(psi_x_y, pml_texel).x * c_param.psi_constant - (local_e.z - e_shift_y_z) * constant.x * c;
     let new_psi_y_x = textureLoad(psi_y_x, pml_texel).x * c_param.psi_constant - (local_e.z - e_shift_x_z) * constant.x * c;
     let new_psi_z_x = textureLoad(psi_z_x, pml_texel).x * c_param.psi_constant - (local_e.y - e_shift_x_y) * constant.x * c;

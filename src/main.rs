@@ -1,5 +1,9 @@
+use std::path::Path;
+
 use clap::Parser;
+use ndarray::ShapeBuilder;
 use pollster::FutureExt;
+use wgpu::util::DeviceExt;
 
 mod fdtd;
 
@@ -85,15 +89,53 @@ pub struct ModelSettings {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "settings")]
+enum ModeSettings {
+    Texture {
+        ex: Option<String>,
+        ey: Option<String>,
+        ez: Option<String>,
+        hx: Option<String>,
+        hy: Option<String>,
+        hz: Option<String>,
+    },
+    Volume {
+        direction: [f32; 3],
+        field: fdtd::FieldType,
+    },
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
 struct SourceSettings {
     wavelength: f32,
     position: [f32; 3],
     size: [f32; 3],
-    direction: [f32; 3],
+    mode: ModeSettings,
     phase: f32,
     delay: f32,
     fwhm: f32,
     power: f32,
+}
+
+enum Source {
+    Texture {
+        source_bind_group: wgpu::BindGroup,
+        z_layer: u32,
+        wavelength: f32,
+        delay: f32,
+        fwhm: f32,
+    },
+    Volume {
+        direction: [f32; 3],
+        wavelength: f32,
+        position: [f32; 3],
+        size: [f32; 3],
+        phase: f32,
+        delay: f32,
+        fwhm: f32,
+        power: f32,
+    },
 }
 
 #[repr(C)]
@@ -101,6 +143,67 @@ struct SourceSettings {
 struct Vertex {
     pos: [f32; 2],
     tex_coord: [f32; 2],
+}
+
+fn fill_real_imag_csv<P: AsRef<Path>>(
+    path: P,
+    phase: f32,
+    power_scale: f32,
+    dimension_scale: [f32; 3],
+    offset: [f32; 3],
+    domain: [[f32; 2]; 3],
+    dx: f32,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> anyhow::Result<wgpu::TextureView> {
+    let step_x = (domain[0][1] - domain[0][0]) / dx;
+    let step_y = (domain[1][1] - domain[1][0]) / dx;
+
+    let grid_x = step_x.ceil() as usize;
+    let grid_y = step_y.ceil() as usize;
+
+    let mut rdr = csv::Reader::from_path(path)?;
+    let mut texture_array: ndarray::Array2<nalgebra::Vector2<f32>> =
+        ndarray::Array2::default((grid_x as usize, grid_y as usize).f());
+
+    for record in rdr.records() {
+        let record = record?;
+        let x: f32 = record.get(0).unwrap().parse()?;
+        let y: f32 = record.get(1).unwrap().parse()?;
+        let real_amp: f32 = record.get(2).unwrap().parse()?;
+        let imag_amp: f32 = record.get(3).unwrap().parse()?;
+
+        let x = ((x * dimension_scale[0] - domain[0][0] + offset[0]) / dx).round() as usize;
+        let y = ((y * dimension_scale[1] - domain[1][0] + offset[1]) / dx).round() as usize;
+        // TODO: sampling for resize
+
+        let (ps, pc) = phase.to_radians().sin_cos();
+
+        texture_array[[x, y]] =
+            nalgebra::vector![real_amp * pc - imag_amp * ps, real_amp * ps + imag_amp * pc]
+                * power_scale;
+    }
+
+    Ok(device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: grid_x as _,
+                    height: grid_y as _,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            },
+            bytemuck::cast_slice(texture_array.as_slice_memory_order().unwrap()),
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default()))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -176,6 +279,295 @@ fn main() -> anyhow::Result<()> {
         TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
     });
 
+    anyhow::ensure!(
+        settings.domain[0][1] > settings.domain[0][0],
+        "RHS of domain[0] is less or equal than LHS!"
+    );
+    anyhow::ensure!(
+        settings.domain[1][1] > settings.domain[1][0],
+        "RHS of domain[1] is less or equal than LHS!"
+    );
+    anyhow::ensure!(
+        settings.domain[2][1] > settings.domain[2][0],
+        "RHS of domain[2] is less or equal than LHS!"
+    );
+
+    let mode_source_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: wgpu::TextureFormat::Rg32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: wgpu::TextureFormat::Rg32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: wgpu::TextureFormat::Rg32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+    let empty_placeholder = device
+        .create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("EMPTY D2 Rg32Float"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            },
+            bytemuck::cast_slice(&[0f32; 2]),
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut electric_sources = vec![];
+    let mut magnetic_sources = vec![];
+
+    for source in settings.sources.iter_mut() {
+        match &mut source.mode {
+            ModeSettings::Texture {
+                ex,
+                ey,
+                ez,
+                hx,
+                hy,
+                hz,
+            } => {
+                let ex = ex
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+                let ey = ey
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+                let ez = ez
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+
+                if ex.is_some() || ey.is_some() || ez.is_some() {
+                    let electric_source_bind_group =
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: None,
+                            layout: &mode_source_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(match &ex {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(match &ey {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(match &ez {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                            ],
+                        });
+
+                    electric_sources.push(Source::Texture {
+                        source_bind_group: electric_source_bind_group,
+                        wavelength: source.wavelength,
+                        delay: source.delay,
+                        fwhm: source.fwhm,
+                        z_layer: ((source.position[2] - settings.domain[2][0])
+                            / settings.spatial_step)
+                            .round() as u32,
+                    });
+                }
+
+                let hx = hx
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+                let hy = hy
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+                let hz = hz
+                    .as_ref()
+                    .map(|path| {
+                        fill_real_imag_csv(
+                            path,
+                            source.phase,
+                            source.power,
+                            source.size,
+                            source.position,
+                            settings.domain,
+                            settings.spatial_step,
+                            &device,
+                            &queue,
+                        )
+                    })
+                    .transpose()?;
+
+                if hx.is_some() || hy.is_some() || hz.is_some() {
+                    let magnetic_source_bind_group =
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: None,
+                            layout: &mode_source_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(match &hx {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(match &hy {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(match &hz {
+                                        Some(texture_view) => texture_view,
+                                        None => &empty_placeholder,
+                                    }),
+                                },
+                            ],
+                        });
+
+                    magnetic_sources.push(Source::Texture {
+                        source_bind_group: magnetic_source_bind_group,
+                        wavelength: source.wavelength,
+                        delay: source.delay,
+                        fwhm: source.fwhm,
+                        z_layer: ((source.position[2] - settings.domain[2][0])
+                            / settings.spatial_step)
+                            .round() as u32,
+                    });
+                }
+            }
+            ModeSettings::Volume { direction, field } => match field {
+                fdtd::FieldType::E => electric_sources.push(Source::Volume {
+                    direction: *direction,
+                    wavelength: source.wavelength,
+                    position: source.position,
+                    size: source.size,
+                    phase: source.phase,
+                    delay: source.delay,
+                    fwhm: source.fwhm,
+                    power: source.power,
+                }),
+                fdtd::FieldType::H => magnetic_sources.push(Source::Volume {
+                    direction: *direction,
+                    wavelength: source.wavelength,
+                    position: source.position,
+                    size: source.size,
+                    phase: source.phase,
+                    delay: source.delay,
+                    fwhm: source.fwhm,
+                    power: source.power,
+                }),
+            },
+        }
+    }
+
     if let (Some(event_loop), Some(surface), Some(window)) = visualize_component {
         let caps = surface.get_capabilities(&adapter);
 
@@ -221,6 +613,7 @@ fn main() -> anyhow::Result<()> {
                     z: cell,
                 }
             }),
+            &mode_source_bind_group_layout,
         )?;
 
         let mut step_counter = 0;
@@ -349,64 +742,169 @@ fn main() -> anyhow::Result<()> {
             if paused {
                 return;
             }
- 
+
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
             fdtd.update_magnetic_field(&mut encoder);
+            for source in magnetic_sources.iter() {
+                match source {
+                    Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
+                        let pulse_envelope = (-((std::f32::consts::PI
+                            * fwhm
+                            * (step_counter as f32 * settings.temporal_step - delay))
+                            .powi(2)
+                            / (4.0 * (2.0 as f32).ln()))
+                        .powi(2))
+                        .exp();
+
+                        let position = [
+                            settings.boundary.get_extra_grid_extent() / 2,
+                            settings.boundary.get_extra_grid_extent() / 2,
+                            settings.boundary.get_extra_grid_extent() / 2 + z_layer,
+                        ];
+
+                        let phasor = (-2.0
+                            * std::f32::consts::PI
+                            * (step_counter as f32 * settings.temporal_step - delay)
+                            / wavelength).sin_cos();
+
+                        fdtd.excite_magnetic_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
+                    },
+                    Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
+                        let pulse_envelope = (-((std::f32::consts::PI
+                            * fwhm
+                            * (step_counter as f32 * settings.temporal_step - delay))
+                            .powi(2)
+                            / (4.0 * (2.0 as f32).ln()))
+                        .powi(2))
+                        .exp();
+
+                        let cw_component = (-2.0
+                            * std::f32::consts::PI
+                            * (step_counter as f32 * settings.temporal_step - delay)
+                            / wavelength
+                            + phase.to_radians())
+                        .cos();
+
+                        let direction = nalgebra::Vector3::from(*direction).normalize();
+                        let actual_position = [
+                            ((position[0] - settings.domain[0][0] - size[0] / 2.0)
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                            ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                            ((position[2] - settings.domain[2][0] - size[2] / 2.0)
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                        ];
+                        let actual_size = [
+                            if size[0] > 0.0 {
+                                (size[0] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                            if size[1] > 0.0 {
+                                (size[1] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                            if size[2] > 0.0 {
+                                (size[2] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                        ];
+
+                        fdtd.excite_magnetic_field_volume(
+                            &mut encoder,
+                            actual_position,
+                            actual_size,
+                            (direction * pulse_envelope * cw_component * *power).into(),
+                        );
+                    },
+                }
+            }
             fdtd.update_electric_field(&mut encoder);
-            for source in settings.sources.iter() {
-                let pulse_envelope = (-((std::f32::consts::PI
-                    * source.fwhm
-                    * (step_counter as f32 * settings.temporal_step - source.delay))
-                    .powi(2)
-                    / (4.0 * (2.0 as f32).ln()))
-                .powi(2))
-                .exp();
+            for source in electric_sources.iter() {
+                match source {
+                    Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
+                        let pulse_envelope = (-((std::f32::consts::PI
+                            * fwhm
+                            * (step_counter as f32 * settings.temporal_step - delay))
+                            .powi(2)
+                            / (4.0 * (2.0 as f32).ln()))
+                        .powi(2))
+                        .exp();
 
-                let cw_component = (-2.0
-                    * std::f32::consts::PI
-                    * (step_counter as f32 * settings.temporal_step - source.delay)
-                    / source.wavelength
-                    + source.phase.to_radians())
-                .cos();
+                        let position = [
+                            settings.boundary.get_extra_grid_extent() / 2,
+                            settings.boundary.get_extra_grid_extent() / 2,
+                            settings.boundary.get_extra_grid_extent() / 2 + z_layer,
+                        ];
 
-                let direction = nalgebra::Vector3::from(source.direction).normalize();
-                let actual_position = [
-                    ((source.position[0] - settings.domain[0][0] - source.size[0] / 2.0)
-                        / settings.spatial_step)
-                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                    ((source.position[1] - settings.domain[1][0] - source.size[1] / 2.0 )
-                        / settings.spatial_step)
-                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                    ((source.position[2] - settings.domain[2][0] - source.size[2] / 2.0)
-                        / settings.spatial_step)
-                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                ];
-                let actual_size = [
-                    if source.size[0] > 0.0 {
-                        (source.size[0] / settings.spatial_step).ceil() as u32
-                    } else {
-                        1
-                    },
-                    if source.size[1] > 0.0 {
-                        (source.size[1] / settings.spatial_step).ceil() as u32
-                    } else {
-                        1
-                    },
-                    if source.size[2] > 0.0 {
-                        (source.size[2] / settings.spatial_step).ceil() as u32
-                    } else {
-                        1
-                    },
-                ];
+                        let phasor = (-2.0
+                            * std::f32::consts::PI
+                            * (step_counter as f32 * settings.temporal_step - delay)
+                            / wavelength).sin_cos();
 
-                fdtd.excite_electric_field(
-                    &mut encoder,
-                    actual_position,
-                    actual_size,
-                    (direction * pulse_envelope * cw_component * source.power).into(),
-                );
+                        fdtd.excite_electric_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
+                    },
+                    Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
+                        let pulse_envelope = (-((std::f32::consts::PI
+                            * fwhm
+                            * (step_counter as f32 * settings.temporal_step - delay))
+                            .powi(2)
+                            / (4.0 * (2.0 as f32).ln()))
+                        .powi(2))
+                        .exp();
+
+                        let cw_component = (-2.0
+                            * std::f32::consts::PI
+                            * (step_counter as f32 * settings.temporal_step - delay)
+                            / wavelength
+                            + phase.to_radians())
+                        .cos();
+
+                        let direction = nalgebra::Vector3::from(*direction).normalize();
+                        let actual_position = [
+                            ((position[0] - settings.domain[0][0] - size[0] / 2.0)
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                            ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                            ((position[2] - settings.domain[2][0] - size[2] / 2.0)
+                                / settings.spatial_step)
+                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                        ];
+                        let actual_size = [
+                            if size[0] > 0.0 {
+                                (size[0] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                            if size[1] > 0.0 {
+                                (size[1] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                            if size[2] > 0.0 {
+                                (size[2] / settings.spatial_step).ceil() as u32
+                            } else {
+                                1
+                            },
+                        ];
+
+                        fdtd.excite_electric_field_volume(
+                            &mut encoder,
+                            actual_position,
+                            actual_size,
+                            (direction * pulse_envelope * cw_component * *power).into(),
+                        );
+                    },
+                }
             }
 
             step_counter += 1;

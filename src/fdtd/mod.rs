@@ -20,7 +20,7 @@ pub enum FieldType {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum BoundaryCondition {
-    PML { sigma: f32, cells: u32 },
+    PML { sigma: f32, alpha: f32, cells: u32 },
     PEC,
     PMC,
 }
@@ -59,7 +59,10 @@ pub struct FDTD {
     magnetic_field_texture: [wgpu::Texture; 3],
     update_magnetic_field_pipeline: wgpu::ComputePipeline,
     update_electric_field_pipeline: wgpu::ComputePipeline,
-    excite_field_pipeline: wgpu::ComputePipeline,
+    electric_field_excitation_bind_group: wgpu::BindGroup,
+    magnetic_field_excitation_bind_group: wgpu::BindGroup,
+    excite_field_volume_pipeline: wgpu::ComputePipeline,
+    excite_field_mode_pipeline: wgpu::ComputePipeline,
     grid_dimension: [u32; 3],
     shift_vector: nalgebra::Vector3<f32>,
     spatial_step: f32,
@@ -90,20 +93,8 @@ impl FDTD {
         default_shader: &str,
         default_scaling_factor: f32,
         workgroup_dispatch: crate::WorkgroupSettings,
+        mode_source_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            dimension[0][1] > dimension[0][0],
-            "RHS of dimension[0] is less or equal than LHS!"
-        );
-        anyhow::ensure!(
-            dimension[1][1] > dimension[1][0],
-            "RHS of dimension[1] is less or equal than LHS!"
-        );
-        anyhow::ensure!(
-            dimension[2][1] > dimension[2][0],
-            "RHS of dimension[2] is less or equal than LHS!"
-        );
-
         let step_x = (dimension[0][1] - dimension[0][0]) / dx;
         let step_y = (dimension[1][1] - dimension[1][0]) / dx;
         let step_z = (dimension[2][1] - dimension[2][0]) / dx;
@@ -149,16 +140,32 @@ impl FDTD {
             magnetic_field_texture[2].create_view(&wgpu::TextureViewDescriptor::default()),
         ];
 
-        let mut importer = gltf_importer::Importer::new(
-            dimension,
-            dt,
-            dx,
-            gltf_importer::MaterialConstants {
-                permittivity: 1.0,
-                permeability: 1.0,
-            },
-            boundary.get_extra_grid_extent(),
-        );
+        let mut importer = match boundary {
+            BoundaryCondition::PML { sigma, alpha, .. } => gltf_importer::Importer::new(
+                dimension,
+                dt,
+                dx,
+                gltf_importer::MaterialConstants {
+                    permittivity: 1.0,
+                    permeability: 1.0,
+                },
+                boundary.get_extra_grid_extent(),
+                sigma,
+                alpha,
+            ),
+            BoundaryCondition::PEC | BoundaryCondition::PMC => gltf_importer::Importer::new(
+                dimension,
+                dt,
+                dx,
+                gltf_importer::MaterialConstants {
+                    permittivity: 1.0,
+                    permeability: 1.0,
+                },
+                boundary.get_extra_grid_extent(),
+                0.,
+                0.,
+            ),
+        };
         for model in models {
             importer.load_gltf(
                 &model.path,
@@ -171,7 +178,7 @@ impl FDTD {
             )?;
         }
 
-        let (electric_constants_map, magnetic_constants_map) =
+        let (electric_constants_map, magnetic_constants_map, pml_constants) =
             importer.into_constants_map(device, queue);
 
         let field_bind_group_layout =
@@ -331,13 +338,121 @@ impl FDTD {
                 }],
             });
 
-        let excite_pipeline_layout =
+        let excite_field_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadOnly,
+                            format: wgpu::TextureFormat::Rg32Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let electric_field_excitation_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &excite_field_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&electric_field_view[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&electric_constants_map),
+                    },
+                ],
+            });
+
+        let magnetic_field_excitation_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &excite_field_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_field_view[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&magnetic_constants_map),
+                    },
+                ],
+            });
+
+        let excite_volume_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&field_bind_group_layout],
+                bind_group_layouts: &[&excite_field_bind_group_layout],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::COMPUTE,
-                    range: 16..60,
+                    range: 0..44,
+                }],
+            });
+
+        let excite_mode_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[
+                    mode_source_bind_group_layout,
+                    &excite_field_bind_group_layout,
+                ],
+                push_constant_ranges: &[wgpu::PushConstantRange {
+                    stages: wgpu::ShaderStages::COMPUTE,
+                    range: 0..28,
                 }],
             });
 
@@ -350,17 +465,11 @@ impl FDTD {
         )?
         .replace("WORKGROUP_X", workgroup_dispatch.x.to_string().as_str())
         .replace("WORKGROUP_Y", workgroup_dispatch.y.to_string().as_str())
-        .replace("WORKGROUP_Z", workgroup_dispatch.z.to_string().as_str())
-        .replace(
-            "CACHE_VOL",
-            workgroup_dispatch.cache_volume().to_string().as_str(),
-        );
-
-        let truncated = macro_replaced.split("// REMOVE").next().unwrap();
+        .replace("WORKGROUP_Z", workgroup_dispatch.z.to_string().as_str());
 
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FDTD Shader"),
-            source: wgpu::ShaderSource::Wgsl(truncated.into()),
+            source: wgpu::ShaderSource::Wgsl(macro_replaced.into()),
         });
 
         let update_magnetic_field_pipeline =
@@ -379,12 +488,54 @@ impl FDTD {
                 entry_point: "update_electric_field",
             });
 
-        let excite_field_pipeline =
+        let volume_excitation_shader_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("FDTD Volume Excitation Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    std::fs::read_to_string(
+                        std::env::current_dir()?
+                            .join("shader")
+                            .join("fdtd")
+                            .join("excitation-volume.wgsl"),
+                    )?
+                    .replace("WORKGROUP_X", workgroup_dispatch.x.to_string().as_str())
+                    .replace("WORKGROUP_Y", workgroup_dispatch.y.to_string().as_str())
+                    .replace("WORKGROUP_Z", workgroup_dispatch.z.to_string().as_str())
+                    .into(),
+                ),
+            });
+
+        let mode_excitation_shader_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("FDTD Mode Excitation Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    std::fs::read_to_string(
+                        std::env::current_dir()?
+                            .join("shader")
+                            .join("fdtd")
+                            .join("excitation-mode.wgsl"),
+                    )?
+                    .replace("WORKGROUP_X", workgroup_dispatch.x.to_string().as_str())
+                    .replace("WORKGROUP_Y", workgroup_dispatch.y.to_string().as_str())
+                    .replace("WORKGROUP_Z", workgroup_dispatch.z.to_string().as_str())
+                    .into(),
+                ),
+            });
+
+        let excite_field_volume_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
-                layout: Some(&excite_pipeline_layout),
-                module: &shader_module,
-                entry_point: "excite_field",
+                layout: Some(&excite_volume_pipeline_layout),
+                module: &volume_excitation_shader_module,
+                entry_point: "excite_field_volume",
+            });
+
+        let excite_field_mode_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&excite_mode_pipeline_layout),
+                module: &mode_excitation_shader_module,
+                entry_point: "excite_field_mode",
             });
 
         let visualization = render_format
@@ -625,14 +776,22 @@ impl FDTD {
         ];
 
         let pml = match boundary {
-            BoundaryCondition::PML { cells, .. } => Some(PMLBoundary::new(
+            BoundaryCondition::PML {
+                sigma,
+                alpha,
+                cells,
+            } => Some(PMLBoundary::new(
                 &device,
                 cells,
+                alpha,
+                sigma,
+                dt,
                 &electric_field_view,
                 &magnetic_field_view,
                 &electric_constants_map,
                 &magnetic_constants_map,
                 simulation_dimension,
+                pml_constants.unwrap(),
             )),
             BoundaryCondition::PEC | BoundaryCondition::PMC => None,
         };
@@ -645,7 +804,7 @@ impl FDTD {
             grid_dimension,
             shift_vector,
             spatial_step: dx,
-            excite_field_pipeline,
+            excite_field_volume_pipeline,
             slice_position: (default_slice.position
                 + match default_slice.mode {
                     SliceMode::X => shift_vector[0],
@@ -669,14 +828,17 @@ impl FDTD {
             temporal_step: dt,
             workgroup_dispatch,
             visualization,
+            electric_field_excitation_bind_group,
+            magnetic_field_excitation_bind_group,
+            excite_field_mode_pipeline,
         })
     }
 
     pub fn update_magnetic_field(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        if let BoundaryCondition::PML { sigma, .. } = self.boundary {
+        if let BoundaryCondition::PML { .. } = self.boundary {
             let pml = self.pml.as_ref().unwrap();
-            pml.update_magnetic_field(&mut cpass, self.temporal_step, sigma);
+            pml.update_magnetic_field(&mut cpass);
         }
         cpass.set_pipeline(&self.update_magnetic_field_pipeline);
         cpass.set_bind_group(0, &self.magnetic_field_bind_group, &[]);
@@ -689,15 +851,59 @@ impl FDTD {
         );
     }
 
-    pub fn _excite_magnetic_field(&self, _encoder: &mut wgpu::CommandEncoder) {
-        unimplemented!("not used")
+    pub fn excite_magnetic_field_volume(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        position: [u32; 3],
+        size: [u32; 3],
+        strength: [f32; 3],
+    ) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&self.excite_field_volume_pipeline);
+        cpass.set_bind_group(0, &self.magnetic_field_excitation_bind_group, &[]);
+        cpass.set_push_constants(0, bytemuck::cast_slice(&size));
+        cpass.set_push_constants(16, bytemuck::cast_slice(&strength));
+        cpass.set_push_constants(32, bytemuck::cast_slice(&position));
+        cpass.dispatch_workgroups(
+            (size[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
+            (size[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
+            (size[2] as f32 / self.workgroup_dispatch.z as f32).ceil() as u32,
+        );
+    }
+
+    pub fn excite_magnetic_field_mode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        position: [u32; 3],
+        (sin_t, cos_t): (f32, f32),
+        envelope: f32,
+        mode_bind_group: &wgpu::BindGroup,
+    ) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&self.excite_field_mode_pipeline);
+        cpass.set_bind_group(0, mode_bind_group, &[]);
+        cpass.set_bind_group(1, &self.magnetic_field_excitation_bind_group, &[]);
+        cpass.set_push_constants(0, bytemuck::cast_slice(&position));
+        cpass.set_push_constants(
+            12,
+            bytemuck::cast_slice(&[cos_t, sin_t, envelope, self.temporal_step]),
+        );
+        cpass.dispatch_workgroups(
+            ((self.grid_dimension[0] - self.boundary.get_extra_grid_extent()) as f32
+                / self.workgroup_dispatch.x as f32)
+                .ceil() as u32,
+            ((self.grid_dimension[1] - self.boundary.get_extra_grid_extent()) as f32
+                / self.workgroup_dispatch.y as f32)
+                .ceil() as u32,
+            1,
+        );
     }
 
     pub fn update_electric_field(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        if let BoundaryCondition::PML { sigma, .. } = self.boundary {
+        if let BoundaryCondition::PML { .. } = self.boundary {
             let pml = self.pml.as_ref().unwrap();
-            pml.update_electric_field(&mut cpass, self.temporal_step, sigma);
+            pml.update_electric_field(&mut cpass);
         }
         cpass.set_pipeline(&self.update_electric_field_pipeline);
         cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
@@ -710,7 +916,7 @@ impl FDTD {
         );
     }
 
-    pub fn excite_electric_field(
+    pub fn excite_electric_field_volume(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         position: [u32; 3],
@@ -718,15 +924,43 @@ impl FDTD {
         strength: [f32; 3],
     ) {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        cpass.set_pipeline(&self.excite_field_pipeline);
-        cpass.set_bind_group(0, &self.electric_field_bind_group, &[]);
-        cpass.set_push_constants(16, bytemuck::cast_slice(&position));
-        cpass.set_push_constants(32, bytemuck::cast_slice(&size));
-        cpass.set_push_constants(48, bytemuck::cast_slice(&strength));
+        cpass.set_pipeline(&self.excite_field_volume_pipeline);
+        cpass.set_bind_group(0, &self.electric_field_excitation_bind_group, &[]);
+        cpass.set_push_constants(0, bytemuck::cast_slice(&size));
+        cpass.set_push_constants(16, bytemuck::cast_slice(&strength));
+        cpass.set_push_constants(32, bytemuck::cast_slice(&position));
         cpass.dispatch_workgroups(
             (size[0] as f32 / self.workgroup_dispatch.x as f32).ceil() as u32,
             (size[1] as f32 / self.workgroup_dispatch.y as f32).ceil() as u32,
             (size[2] as f32 / self.workgroup_dispatch.z as f32).ceil() as u32,
+        );
+    }
+
+    pub fn excite_electric_field_mode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        position: [u32; 3],
+        (sin_t, cos_t): (f32, f32),
+        envelope: f32,
+        mode_bind_group: &wgpu::BindGroup,
+    ) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&self.excite_field_mode_pipeline);
+        cpass.set_bind_group(0, mode_bind_group, &[]);
+        cpass.set_bind_group(1, &self.electric_field_excitation_bind_group, &[]);
+        cpass.set_push_constants(0, bytemuck::cast_slice(&position));
+        cpass.set_push_constants(
+            12,
+            bytemuck::cast_slice(&[cos_t, sin_t, envelope, self.temporal_step]),
+        );
+        cpass.dispatch_workgroups(
+            ((self.grid_dimension[0] - self.boundary.get_extra_grid_extent()) as f32
+                / self.workgroup_dispatch.x as f32)
+                .ceil() as u32,
+            ((self.grid_dimension[1] - self.boundary.get_extra_grid_extent()) as f32
+                / self.workgroup_dispatch.y as f32)
+                .ceil() as u32,
+            1,
         );
     }
 
@@ -922,7 +1156,11 @@ pub mod gltf_importer {
         electric_constants: ndarray::Array3<std::sync::Mutex<nalgebra::Vector2<f32>>>,
         magnetic_constants: ndarray::Array3<std::sync::Mutex<nalgebra::Vector2<f32>>>,
         shift_vector: nalgebra::Vector3<f32>,
+        extra_extent: u32,
+        pml_sigma: f32,
+        pml_alpha: f32,
     }
+
     impl Importer {
         pub fn new(
             dimension: [[f32; 2]; 3],
@@ -930,6 +1168,8 @@ pub mod gltf_importer {
             dx: f32,
             background: MaterialConstants,
             extra_extent: u32,
+            pml_sigma: f32,
+            pml_alpha: f32,
         ) -> Self {
             let step_x = (dimension[0][1] - dimension[0][0]) / dx;
             let step_y = (dimension[1][1] - dimension[1][0]) / dx;
@@ -968,6 +1208,9 @@ pub mod gltf_importer {
                     dimension[2][0] + (step_z - step_z.floor()) * dx * 0.5
                         - extra_extent as f32 * dx * 0.5
                 ],
+                extra_extent,
+                pml_sigma,
+                pml_alpha,
             }
         }
 
@@ -1003,7 +1246,11 @@ pub mod gltf_importer {
             self,
             device: &wgpu::Device,
             queue: &wgpu::Queue,
-        ) -> (wgpu::TextureView, wgpu::TextureView) {
+        ) -> (
+            wgpu::TextureView,
+            wgpu::TextureView,
+            Option<([wgpu::TextureView; 6], [wgpu::TextureView; 6])>,
+        ) {
             let common_desc = wgpu::TextureDescriptor {
                 label: None,
                 size: wgpu::Extent3d {
@@ -1019,32 +1266,355 @@ pub mod gltf_importer {
                 view_formats: &[],
             };
 
+            let mut ec_map = ndarray::Zip::from(&self.electric_constants)
+                .par_map_collect(|mutex| *mutex.lock().unwrap());
+
+            let mut hc_map = ndarray::Zip::from(&self.magnetic_constants)
+                .par_map_collect(|mutex| *mutex.lock().unwrap());
+
+            let mut pml_constants = None;
+
+            if self.extra_extent > 0 {
+                let half_extent = (self.extra_extent / 2) as usize;
+                let far_x = self.grid_dimension[0] as usize - half_extent;
+                let far_y = self.grid_dimension[1] as usize - half_extent;
+                let far_z = self.grid_dimension[2] as usize - half_extent;
+
+                let simulation_x = (self.grid_dimension[0] - self.extra_extent) as usize;
+                let simulation_y = (self.grid_dimension[1] - self.extra_extent) as usize;
+                let simulation_z = (self.grid_dimension[2] - self.extra_extent) as usize;
+
+                let x_near_plane_electric = ndarray::Array2::from_shape_vec(
+                    (simulation_y, simulation_z),
+                    ec_map
+                        .slice(ndarray::s![
+                            half_extent,
+                            half_extent..far_y,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                ec_map
+                    .slice_mut(ndarray::s![
+                        0..half_extent,
+                        half_extent..far_y,
+                        half_extent..far_z,
+                    ])
+                    .assign(&x_near_plane_electric);
+
+                let x_far_plane_electric = ndarray::Array2::from_shape_vec(
+                    (simulation_y, simulation_z),
+                    ec_map
+                        .slice(ndarray::s![
+                            far_x - 1,
+                            half_extent..far_y,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                ec_map
+                    .slice_mut(ndarray::s![
+                        far_x..self.grid_dimension[0] as usize,
+                        half_extent..far_y,
+                        half_extent..far_z,
+                    ])
+                    .assign(&x_far_plane_electric);
+
+                let y_near_plane_electric = ndarray::Array2::from_shape_vec(
+                    (simulation_x, simulation_z),
+                    ec_map
+                        .slice(ndarray::s![
+                            half_extent..far_x,
+                            half_extent,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                ec_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        0..half_extent,
+                        half_extent..far_z,
+                    ])
+                    .permuted_axes([1, 0, 2])
+                    .assign(&y_near_plane_electric);
+
+                let y_far_plane_electric = ndarray::Array2::from_shape_vec(
+                    (simulation_x, simulation_z),
+                    ec_map
+                        .slice(ndarray::s![
+                            half_extent..far_x,
+                            far_y - 1,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                ec_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        far_y..self.grid_dimension[1] as usize,
+                        half_extent..far_z,
+                    ])
+                    .permuted_axes([1, 0, 2])
+                    .assign(&y_far_plane_electric);
+
+                let mut z_near_plane_electric =
+                    ndarray::Array2::default((simulation_x, simulation_y).f());
+                z_near_plane_electric.assign(&ec_map.slice(ndarray::s![
+                    half_extent..far_x,
+                    half_extent..far_y,
+                    half_extent,
+                ]));
+                ec_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        half_extent..far_y,
+                        0..half_extent,
+                    ])
+                    .permuted_axes([2, 0, 1])
+                    .assign(&z_near_plane_electric);
+
+                let mut z_far_plane_electric =
+                    ndarray::Array2::default((simulation_x, simulation_y).f());
+                z_far_plane_electric.assign(&ec_map.slice(ndarray::s![
+                    half_extent..far_x,
+                    half_extent..far_y,
+                    far_z - 1,
+                ]));
+                ec_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        half_extent..far_y,
+                        far_z..self.grid_dimension[2] as usize,
+                    ])
+                    .permuted_axes([2, 0, 1])
+                    .assign(&z_far_plane_electric);
+
+                let pml_electric_views = [
+                    &x_near_plane_electric,
+                    &x_far_plane_electric,
+                    &y_near_plane_electric,
+                    &y_far_plane_electric,
+                    &z_near_plane_electric,
+                    &z_far_plane_electric,
+                ]
+                .map(|p| {
+                    ndarray::Zip::from(p)
+                        .par_map_collect(|c| (-(self.pml_sigma + self.pml_alpha) * c.y).exp())
+                })
+                .map(|c| {
+                    device
+                        .create_texture_with_data(
+                            queue,
+                            &wgpu::TextureDescriptor {
+                                label: None,
+                                size: wgpu::Extent3d {
+                                    width: c.dim().0 as _,
+                                    height: c.dim().1 as _,
+                                    depth_or_array_layers: 1,
+                                },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::R32Float,
+                                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                                view_formats: &[],
+                            },
+                            bytemuck::cast_slice(c.as_slice_memory_order().unwrap()),
+                        )
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                });
+
+                let x_near_plane_magnetic = ndarray::Array2::from_shape_vec(
+                    (simulation_y, simulation_z),
+                    hc_map
+                        .slice(ndarray::s![
+                            half_extent,
+                            half_extent..far_y,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                hc_map
+                    .slice_mut(ndarray::s![
+                        0..half_extent,
+                        half_extent..far_y,
+                        half_extent..far_z,
+                    ])
+                    .assign(&x_near_plane_magnetic);
+
+                let x_far_plane_magnetic = ndarray::Array2::from_shape_vec(
+                    (simulation_y, simulation_z),
+                    hc_map
+                        .slice(ndarray::s![
+                            far_x - 1,
+                            half_extent..far_y,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                hc_map
+                    .slice_mut(ndarray::s![
+                        far_x..self.grid_dimension[0] as usize,
+                        half_extent..far_y,
+                        half_extent..far_z,
+                    ])
+                    .assign(&x_far_plane_magnetic);
+
+                let y_near_plane_magnetic = ndarray::Array2::from_shape_vec(
+                    (simulation_x, simulation_z),
+                    hc_map
+                        .slice(ndarray::s![
+                            half_extent..far_x,
+                            half_extent,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                hc_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        0..half_extent,
+                        half_extent..far_z,
+                    ])
+                    .permuted_axes([1, 0, 2])
+                    .assign(&y_near_plane_magnetic);
+
+                let y_far_plane_magnetic = ndarray::Array2::from_shape_vec(
+                    (simulation_x, simulation_z),
+                    hc_map
+                        .slice(ndarray::s![
+                            half_extent..far_x,
+                            far_y - 1,
+                            half_extent..far_z,
+                        ])
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap();
+                hc_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        far_y..self.grid_dimension[1] as usize,
+                        half_extent..far_z,
+                    ])
+                    .permuted_axes([1, 0, 2])
+                    .assign(&y_far_plane_magnetic);
+
+                let mut z_near_plane_magnetic =
+                    ndarray::Array2::default((simulation_x, simulation_y).f());
+                z_near_plane_magnetic.assign(&hc_map.slice(ndarray::s![
+                    half_extent..far_x,
+                    half_extent..far_y,
+                    half_extent,
+                ]));
+                hc_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        half_extent..far_y,
+                        0..half_extent,
+                    ])
+                    .permuted_axes([2, 0, 1])
+                    .assign(&z_near_plane_magnetic);
+
+                let mut z_far_plane_magnetic =
+                    ndarray::Array2::default((simulation_x, simulation_y).f());
+                z_far_plane_magnetic.assign(&hc_map.slice(ndarray::s![
+                    half_extent..far_x,
+                    half_extent..far_y,
+                    far_z - 1,
+                ]));
+                hc_map
+                    .slice_mut(ndarray::s![
+                        half_extent..far_x,
+                        half_extent..far_y,
+                        far_z..self.grid_dimension[2] as usize,
+                    ])
+                    .permuted_axes([2, 0, 1])
+                    .assign(&z_far_plane_magnetic);
+
+                let pml_magnetic_views = [
+                    (x_near_plane_magnetic, x_near_plane_electric),
+                    (x_far_plane_magnetic, x_far_plane_electric),
+                    (y_near_plane_magnetic, y_near_plane_electric),
+                    (y_far_plane_magnetic, y_far_plane_electric),
+                    (z_near_plane_magnetic, z_near_plane_electric),
+                    (z_far_plane_magnetic, z_far_plane_electric),
+                ]
+                .map(|(h, e)| {
+                    ndarray::Zip::from(&h).and(&e).par_map_collect(|h, e| {
+                        (-(self.pml_sigma + self.pml_alpha) * e.y / h.y * self.dt).exp()
+                    })
+                })
+                .map(|c| {
+                    device
+                        .create_texture_with_data(
+                            queue,
+                            &wgpu::TextureDescriptor {
+                                label: None,
+                                size: wgpu::Extent3d {
+                                    width: c.dim().0 as _,
+                                    height: c.dim().1 as _,
+                                    depth_or_array_layers: 1,
+                                },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::R32Float,
+                                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                                view_formats: &[],
+                            },
+                            bytemuck::cast_slice(c.as_slice_memory_order().unwrap()),
+                        )
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                });
+
+                pml_constants = Some((pml_electric_views, pml_magnetic_views));
+            }
+
             let electric_constants_map = device
                 .create_texture_with_data(
                     queue,
                     &common_desc,
-                    bytemuck::cast_slice(
-                        // why don't consume-map and Mutex::into_inner()? ndarray doesn't support that!
-                        ndarray::Zip::from(&self.electric_constants)
-                            .par_map_collect(|mutex| *mutex.lock().unwrap())
-                            .as_slice_memory_order()
-                            .unwrap(),
-                    ),
+                    bytemuck::cast_slice(ec_map.as_slice_memory_order().unwrap()),
                 )
                 .create_view(&wgpu::TextureViewDescriptor::default());
+
             let magnetic_constants_map = device
                 .create_texture_with_data(
                     queue,
                     &common_desc,
-                    bytemuck::cast_slice(
-                        ndarray::Zip::from(&self.magnetic_constants)
-                            .par_map_collect(|mutex| *mutex.lock().unwrap())
-                            .as_slice_memory_order()
-                            .unwrap(),
-                    ),
+                    bytemuck::cast_slice(hc_map.as_slice_memory_order().unwrap()),
                 )
                 .create_view(&wgpu::TextureViewDescriptor::default());
-            (electric_constants_map, magnetic_constants_map)
+
+            (
+                electric_constants_map,
+                magnetic_constants_map,
+                pml_constants,
+            )
         }
 
         fn process_node(
@@ -1076,12 +1646,18 @@ pub mod gltf_importer {
                         })
                         .collect();
 
+                    let simulation_x = self.grid_dimension[0] - self.extra_extent;
+                    let simulation_y = self.grid_dimension[1] - self.extra_extent;
+                    let simulation_z = self.grid_dimension[2] - self.extra_extent;
+
                     let flag_map: ndarray::Array3<std::sync::Mutex<u8>> =
                         ndarray::Array3::default((
-                            self.grid_dimension[0] as usize,
-                            self.grid_dimension[1] as usize,
-                            self.grid_dimension[2] as usize,
+                            simulation_x as usize,
+                            simulation_y as usize,
+                            simulation_z as usize,
                         ));
+
+                    let half_extent = self.extra_extent / 2;
                     indices.chunks(3).par_bridge().for_each(|triangle| {
                         let v0 = vertices[triangle[0] as usize];
                         let v1 = vertices[triangle[1] as usize];
@@ -1089,12 +1665,18 @@ pub mod gltf_importer {
                         let edge1 = v1 - v0;
                         let edge2 = v2 - v0;
                         let ray = nalgebra::vector![0.0f32, 0.0, 1.0];
-                        let min_x = v0.x.min(v1.x.min(v2.x)).floor() as u32;
-                        let max_x = v0.x.max(v1.x.max(v2.x)).ceil() as u32;
-                        let min_y = v0.y.min(v1.y.min(v2.y)).floor() as u32;
-                        let max_y = v0.y.max(v1.y.max(v2.y)).ceil() as u32;
+                        let min_x = v0.x.min(v1.x.min(v2.x)).floor().max(0.) as u32;
+                        let max_x = v0.x.max(v1.x.max(v2.x)).ceil().max(0.) as u32;
+                        let min_y = v0.y.min(v1.y.min(v2.y)).floor().max(0.) as u32;
+                        let max_y = v0.y.max(v1.y.max(v2.y)).ceil().max(0.) as u32;
                         (min_x..=max_x).into_par_iter().for_each(|x| {
+                            if x < half_extent || x >= self.grid_dimension[0] - half_extent {
+                                return;
+                            }
                             (min_y..=max_y).into_par_iter().for_each(|y| {
+                                if y < half_extent || y >= self.grid_dimension[1] - half_extent {
+                                    return;
+                                }
                                 let p = nalgebra::vector![x as f32, y as f32, 0.0];
                                 let denominator =
                                     nalgebra::Matrix3::from_columns(&[edge1, edge2, -ray])
@@ -1112,13 +1694,19 @@ pub mod gltf_importer {
                                     let u = nominator_u / denominator;
                                     let v = nominator_v / denominator;
                                     let t = nominator_t / denominator;
-                                    if u >= 0.0 && u <= 1.0 && v >= 0.0 && u + v <= 1.0 {
-                                        assert!(t >= 0.0, "OUT OF BOUND!");
+                                    if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
                                         let h = p + ray * t;
-                                        let x = h.x.round() as usize;
-                                        let y = h.y.round() as usize;
-                                        let z = h.z.round() as usize;
-                                        *flag_map[[x, y, z]].lock().unwrap() = 1;
+                                        let x = h.x.round() as u32 - half_extent;
+                                        let y = h.y.round() as u32 - half_extent;
+                                        let z = (h.z.max(0.).round() as u32).max(half_extent)
+                                            - half_extent;
+
+                                        if z < simulation_z - 1 {
+                                            let x = x as usize;
+                                            let y = y as usize;
+                                            let z = z as usize;
+                                            *flag_map[[x, y, z]].lock().unwrap() = 1;
+                                        }
                                     }
                                 }
                             })
@@ -1127,17 +1715,21 @@ pub mod gltf_importer {
 
                     let accumulator: ndarray::Array3<std::sync::Mutex<u8>> =
                         ndarray::Array3::default((
-                            self.grid_dimension[0] as usize,
-                            self.grid_dimension[1] as usize,
-                            self.grid_dimension[2] as usize,
+                            simulation_x as usize,
+                            simulation_y as usize,
+                            simulation_z as usize,
                         ));
 
-                    (0..self.grid_dimension[2]).for_each(|z| {
-                        (0..self.grid_dimension[0]).into_par_iter().for_each(|x| {
-                            (0..self.grid_dimension[1]).into_par_iter().for_each(|y| {
+                    (0..simulation_z).for_each(|z| {
+                        (0..simulation_x).into_par_iter().for_each(|x| {
+                            (0..simulation_y).into_par_iter().for_each(|y| {
                                 let idx_x = x as usize;
                                 let idx_y = y as usize;
                                 let idx_z = z as usize;
+
+                                let grid_x = (x + half_extent) as usize;
+                                let grid_y = (y + half_extent) as usize;
+                                let grid_z = (z + half_extent) as usize;
                                 let mut acc_write =
                                     accumulator[[idx_x, idx_y, idx_z]].lock().unwrap();
                                 *acc_write = *flag_map[[idx_x, idx_y, idx_z]].lock().unwrap();
@@ -1146,10 +1738,10 @@ pub mod gltf_importer {
                                         *accumulator[[idx_x, idx_y, idx_z - 1]].lock().unwrap();
                                 }
                                 if *acc_write % 2 == 1 {
-                                    *self.electric_constants[[idx_x, idx_y, idx_z]]
+                                    *self.electric_constants[[grid_x, grid_y, grid_z]]
                                         .lock()
                                         .unwrap() = nalgebra::vector![constants.ec2, constants.ec3];
-                                    *self.magnetic_constants[[idx_x, idx_y, idx_z]]
+                                    *self.magnetic_constants[[grid_x, grid_y, grid_z]]
                                         .lock()
                                         .unwrap() = nalgebra::vector![constants.hc2, constants.hc3];
                                 }
