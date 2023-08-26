@@ -4,6 +4,8 @@ use wgpu::util::DeviceExt;
 
 use self::pml::PMLBoundary;
 
+pub type Component = SliceMode;
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum SliceMode {
     X = 2,

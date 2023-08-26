@@ -12,7 +12,7 @@
     "boundary": {
         "type": "PML",
         "sigma": 30,
-        "alpha": 5,
+        "alpha": 10,
         "cells": 8
     },
     "spatial_step": 0.02,
@@ -44,8 +44,8 @@
                 }
             },
             "phase": 0,
-            "delay": 5,
-            "fwhm": 0.5,
+            "delay": 0,
+            "fwhm": 0,
             "power": 0.1
         }
     ],

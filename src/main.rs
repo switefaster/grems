@@ -6,6 +6,7 @@ use pollster::FutureExt;
 use wgpu::util::DeviceExt;
 
 mod fdtd;
+mod interpolator;
 
 /// Gpu-accelerated Rusty Electro-Magnetic field Simulator
 #[derive(Parser, Debug)]
@@ -92,6 +93,10 @@ pub struct ModelSettings {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "settings")]
 enum ModeSettings {
+    PointCloud {
+        file: String,
+        exclude: Vec<(fdtd::FieldType, fdtd::Component)>,
+    },
     Texture {
         ex: Option<String>,
         ey: Option<String>,
@@ -99,6 +104,7 @@ enum ModeSettings {
         hx: Option<String>,
         hy: Option<String>,
         hz: Option<String>,
+        spatial_step: f32,
     },
     Volume {
         direction: [f32; 3],
@@ -145,7 +151,122 @@ struct Vertex {
     tex_coord: [f32; 2],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RG32(f32, f32);
+
+impl resize::PixelFormat for RG32 {
+    type InputPixel = Self;
+
+    type OutputPixel = Self;
+
+    type Accumulator = Self;
+
+    #[inline(always)]
+    fn new() -> Self::Accumulator {
+        Self(0., 0.)
+    }
+
+    #[inline(always)]
+    fn add(&self, acc: &mut Self::Accumulator, inp: Self::InputPixel, coeff: f32) {
+        acc.0 += inp.0 * coeff;
+        acc.1 += inp.1 * coeff;
+    }
+
+    #[inline(always)]
+    fn add_acc(acc: &mut Self::Accumulator, inp: Self::Accumulator, coeff: f32) {
+        acc.0 += inp.0 * coeff;
+        acc.1 += inp.1 * coeff;
+    }
+
+    #[inline(always)]
+    fn into_pixel(&self, acc: Self::Accumulator) -> Self::OutputPixel {
+        acc
+    }
+}
+
 fn fill_real_imag_csv<P: AsRef<Path>>(
+    path: P,
+    phase: f32,
+    power_scale: f32,
+    dimension_scale: [f32; 3],
+    offset: [f32; 3],
+    domain: [[f32; 2]; 3],
+    dx: f32,
+    texture_dx: f32,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> anyhow::Result<wgpu::TextureView> {
+    let step_x = (domain[0][1] - domain[0][0]) / dx;
+    let step_y = (domain[1][1] - domain[1][0]) / dx;
+
+    let grid_x = step_x.ceil() as usize;
+    let grid_y = step_y.ceil() as usize;
+
+    let mut rdr = csv::Reader::from_path(path)?;
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for record in rdr.records() {
+        let record = record?;
+        let x: f32 = record.get(0).unwrap().parse()?;
+        let y: f32 = record.get(1).unwrap().parse()?;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+
+    anyhow::ensure!(width > 0. && height > 0.);
+
+    let width = (width * dimension_scale[0] / texture_dx).ceil() as usize;
+    let height = (height * dimension_scale[1] / texture_dx).ceil() as usize;
+
+    let input_texture = ndarray::Array2::<(f32, f32)>::default((width, height).f());
+    let (ps, pc) = phase.to_radians().sin_cos();
+
+    for record in rdr.records() {
+        let record = record?;
+        let x: f32 = record.get(0).unwrap().parse()?;
+        let y: f32 = record.get(1).unwrap().parse()?;
+        let real_amp: f32 = record.get(2).unwrap().parse()?;
+        let imag_amp: f32 = record.get(3).unwrap().parse()?;
+
+        let x = ((x * dimension_scale[0] - domain[0][0] + offset[0]) / dx).round() as usize;
+        let y = ((y * dimension_scale[1] - domain[1][0] + offset[1]) / dx).round() as usize;
+        // TODO: sampling for resize
+
+        nalgebra::vector![real_amp * pc - imag_amp * ps, real_amp * ps + imag_amp * pc]
+            * power_scale;
+    }
+
+    Ok(device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: grid_x as _,
+                    height: grid_y as _,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            },
+            bytemuck::cast_slice(texture_array.as_slice_memory_order().unwrap()),
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default()))
+}
+
+fn fill_poing_cloud_csv<P: AsRef<Path>>(
     path: P,
     phase: f32,
     power_scale: f32,
@@ -163,26 +284,37 @@ fn fill_real_imag_csv<P: AsRef<Path>>(
     let grid_y = step_y.ceil() as usize;
 
     let mut rdr = csv::Reader::from_path(path)?;
-    let mut texture_array: ndarray::Array2<nalgebra::Vector2<f32>> =
-        ndarray::Array2::default((grid_x as usize, grid_y as usize).f());
 
-    for record in rdr.records() {
-        let record = record?;
-        let x: f32 = record.get(0).unwrap().parse()?;
-        let y: f32 = record.get(1).unwrap().parse()?;
-        let real_amp: f32 = record.get(2).unwrap().parse()?;
-        let imag_amp: f32 = record.get(3).unwrap().parse()?;
+    let interp = interpolator::Linear2DInterpolator::<2>::new(
+        rdr.records()
+            .map(|record| {
+                let record = record.unwrap();
+                let x: f32 = record.get(0).unwrap().parse().unwrap();
+                let y: f32 = record.get(1).unwrap().parse().unwrap();
+                let real_amp: f32 = record.get(2).unwrap().parse().unwrap();
+                let imag_amp: f32 = record.get(3).unwrap().parse().unwrap();
 
-        let x = ((x * dimension_scale[0] - domain[0][0] + offset[0]) / dx).round() as usize;
-        let y = ((y * dimension_scale[1] - domain[1][0] + offset[1]) / dx).round() as usize;
-        // TODO: sampling for resize
+                let x = x * dimension_scale[0] - domain[0][0] + offset[0];
+                let y = y * dimension_scale[1] - domain[1][0] + offset[1];
 
-        let (ps, pc) = phase.to_radians().sin_cos();
+                (nalgebra::vector![x as f64, y as f64], [real_amp, imag_amp])
+            })
+            .collect(),
+    );
 
-        texture_array[[x, y]] =
-            nalgebra::vector![real_amp * pc - imag_amp * ps, real_amp * ps + imag_amp * pc]
-                * power_scale;
-    }
+    let (ps, pc) = phase.to_radians().sin_cos();
+
+    let texture_array: ndarray::Array2<nalgebra::Vector2<f32>> =
+        ndarray::Array2::from_shape_fn((grid_x as usize, grid_y as usize).f(), |(x, y)| {
+            let v = interp
+                .interpolate(nalgebra::vector![
+                    (x as f64 + 0.5) * dx as f64,
+                    (y as f64 + 0.5) * dx as f64
+                ])
+                .unwrap_or_default();
+
+            nalgebra::vector![v[0] * pc - v[1] * ps, v[0] * ps + v[1] * pc] * power_scale
+        });
 
     Ok(device
         .create_texture_with_data(
@@ -362,6 +494,7 @@ fn main() -> anyhow::Result<()> {
                 hx,
                 hy,
                 hz,
+                spatial_step,
             } => {
                 let ex = ex
                     .as_ref()
@@ -565,6 +698,7 @@ fn main() -> anyhow::Result<()> {
                     power: source.power,
                 }),
             },
+            ModeSettings::PointCloud { file, exclude } => todo!(),
         }
     }
 
