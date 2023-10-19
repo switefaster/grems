@@ -151,31 +151,30 @@ struct Vertex {
     tex_coord: [f32; 2],
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RG32(f32, f32);
+struct RG32;
 
 impl resize::PixelFormat for RG32 {
-    type InputPixel = Self;
+    type InputPixel = nalgebra::Vector2<f32>;
 
-    type OutputPixel = Self;
+    type OutputPixel = nalgebra::Vector2<f32>;
 
-    type Accumulator = Self;
+    type Accumulator = nalgebra::Vector2<f32>;
 
     #[inline(always)]
     fn new() -> Self::Accumulator {
-        Self(0., 0.)
+        nalgebra::vector![0.0, 0.0]
     }
 
     #[inline(always)]
     fn add(&self, acc: &mut Self::Accumulator, inp: Self::InputPixel, coeff: f32) {
-        acc.0 += inp.0 * coeff;
-        acc.1 += inp.1 * coeff;
+        acc.x += inp.x * coeff;
+        acc.y += inp.y * coeff;
     }
 
     #[inline(always)]
     fn add_acc(acc: &mut Self::Accumulator, inp: Self::Accumulator, coeff: f32) {
-        acc.0 += inp.0 * coeff;
-        acc.1 += inp.1 * coeff;
+        acc.x += inp.x * coeff;
+        acc.y += inp.y * coeff;
     }
 
     #[inline(always)]
@@ -202,7 +201,7 @@ fn fill_real_imag_csv<P: AsRef<Path>>(
     let grid_x = step_x.ceil() as usize;
     let grid_y = step_y.ceil() as usize;
 
-    let mut rdr = csv::Reader::from_path(path)?;
+    let mut rdr = csv::Reader::from_path(path.as_ref())?;
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut min_y = f32::INFINITY;
@@ -223,11 +222,14 @@ fn fill_real_imag_csv<P: AsRef<Path>>(
 
     anyhow::ensure!(width > 0. && height > 0.);
 
-    let width = (width * dimension_scale[0] / texture_dx).ceil() as usize;
-    let height = (height * dimension_scale[1] / texture_dx).ceil() as usize;
+    let texture_width = (width / texture_dx).ceil() as usize + 1;
+    let texture_height = (height / texture_dx).ceil() as usize + 1;
 
-    let input_texture = ndarray::Array2::<(f32, f32)>::default((width, height).f());
+    let mut input_texture =
+        ndarray::Array2::<nalgebra::Vector2<f32>>::default((texture_width, texture_height).f());
     let (ps, pc) = phase.to_radians().sin_cos();
+
+    let mut rdr = csv::Reader::from_path(path)?;
 
     for record in rdr.records() {
         let record = record?;
@@ -236,12 +238,50 @@ fn fill_real_imag_csv<P: AsRef<Path>>(
         let real_amp: f32 = record.get(2).unwrap().parse()?;
         let imag_amp: f32 = record.get(3).unwrap().parse()?;
 
-        let x = ((x * dimension_scale[0] - domain[0][0] + offset[0]) / dx).round() as usize;
-        let y = ((y * dimension_scale[1] - domain[1][0] + offset[1]) / dx).round() as usize;
-        // TODO: sampling for resize
+        let x = ((x - min_x) / texture_dx).round() as usize;
+        let y = ((y - min_y) / texture_dx).round() as usize;
 
-        nalgebra::vector![real_amp * pc - imag_amp * ps, real_amp * ps + imag_amp * pc]
-            * power_scale;
+        input_texture[[x, y]] =
+            nalgebra::vector![real_amp * pc - imag_amp * ps, real_amp * ps + imag_amp * pc,]
+                * power_scale;
+    }
+
+    let dst_width = (width * dimension_scale[0] / dx).ceil() as usize;
+    let dst_height = (height * dimension_scale[1] / dx).ceil() as usize;
+
+    let mut result_texture =
+        ndarray::Array2::<nalgebra::Vector2<f32>>::default((dst_width, dst_height).f());
+
+    let mut resizer = resize::new(
+        texture_width,
+        texture_height,
+        dst_width,
+        dst_height,
+        RG32,
+        resize::Type::Lanczos3,
+    )?;
+
+    resizer.resize(
+        input_texture.as_slice_memory_order().unwrap(),
+        result_texture.as_slice_memory_order_mut().unwrap(),
+    )?;
+
+    let mut embed_texture =
+        ndarray::Array2::<nalgebra::Vector2<f32>>::default((grid_x, grid_y).f());
+
+    let offset_x = (offset[0] / dx).round() as i32 + (grid_x as i32 - dst_width as i32) / 2;
+    let offset_y = (offset[1] / dx).round() as i32 + (grid_y as i32 - dst_height as i32) / 2;
+
+    for x in 0..dst_width as i32 {
+        for y in 0..dst_height as i32 {
+            let embed_x = x + offset_x;
+            let embed_y = y + offset_y;
+
+            if embed_x > 0 && embed_y > 0 && embed_x < grid_x as i32 && embed_y < grid_y as i32 {
+                embed_texture[[embed_x as usize, embed_y as usize]] =
+                    result_texture[[x as usize, y as usize]];
+            }
+        }
     }
 
     Ok(device
@@ -261,7 +301,7 @@ fn fill_real_imag_csv<P: AsRef<Path>>(
                 usage: wgpu::TextureUsages::STORAGE_BINDING,
                 view_formats: &[],
             },
-            bytemuck::cast_slice(texture_array.as_slice_memory_order().unwrap()),
+            bytemuck::cast_slice(embed_texture.as_slice_memory_order().unwrap()),
         )
         .create_view(&wgpu::TextureViewDescriptor::default()))
 }
@@ -507,6 +547,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )
@@ -523,6 +564,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )
@@ -539,6 +581,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )
@@ -597,6 +640,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )
@@ -613,6 +657,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )
@@ -629,6 +674,7 @@ fn main() -> anyhow::Result<()> {
                             source.position,
                             settings.domain,
                             settings.spatial_step,
+                            *spatial_step,
                             &device,
                             &queue,
                         )

@@ -15,8 +15,8 @@
         "alpha": 10,
         "cells": 8
     },
-    "spatial_step": 0.02,
-    "temporal_step": 0.01,
+    "spatial_step": 0.03,
+    "temporal_step": 0.0157,
     "steps_per_second_limit": 1000,
     "default_slice": {
         "field": "E",
@@ -40,7 +40,8 @@
                     "ez": "modes/fem_w1000_h200_index2p0_cw1000_ez.m00.csv",
                     "hx": "modes/fem_w1000_h200_index2p0_cw1000_hx.m00.csv",
                     "hy": "modes/fem_w1000_h200_index2p0_cw1000_hy.m00.csv",
-                    "hz": "modes/fem_w1000_h200_index2p0_cw1000_hz.m00.csv"
+                    "hz": "modes/fem_w1000_h200_index2p0_cw1000_hz.m00.csv",
+                    "spatial_step": 0.02
                 }
             },
             "phase": 0,
