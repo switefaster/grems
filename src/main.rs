@@ -4,7 +4,14 @@ use clap::Parser;
 use ndarray::ShapeBuilder;
 use pollster::FutureExt;
 use wgpu::util::DeviceExt;
-
+use wgpu_text::{
+    glyph_brush::{Section as TextSection, Text},
+    BrushBuilder,
+};
+use winit::{
+    event::{ElementState, KeyEvent},
+    keyboard::PhysicalKey,
+};
 mod fdtd;
 mod interpolator;
 
@@ -404,10 +411,12 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     });
     let visualize_component = if !options.no_visual {
-        let event_loop = winit::event_loop::EventLoop::new();
-        let window = winit::window::WindowBuilder::new()
-            .with_title("GREMS")
-            .build(&event_loop)?;
+        let event_loop = winit::event_loop::EventLoop::new()?;
+        let window = std::sync::Arc::new(
+            winit::window::WindowBuilder::new()
+                .with_title("GREMS")
+                .build(&event_loop)?,
+        );
         (
             Some(event_loop),
             Some(unsafe { instance.create_surface(&window)? }),
@@ -763,14 +772,13 @@ fn main() -> anyhow::Result<()> {
 
         surface.configure(&device, &surface_config);
 
-        let mut staging_belt = wgpu::util::StagingBelt::new(1024);
-
-        let roboto = wgpu_glyph::ab_glyph::FontArc::try_from_slice(include_bytes!(
-            "../fonts/Roboto-Regular.ttf"
-        ))?;
-
-        let mut glyph_brush =
-            wgpu_glyph::GlyphBrushBuilder::using_font(roboto).build(&device, surface_config.format);
+        let mut brush =
+            BrushBuilder::using_font_bytes(include_bytes!("../fonts/Roboto-Regular.ttf"))?.build(
+                &device,
+                surface_config.width,
+                surface_config.height,
+                surface_config.format,
+            );
 
         let mut fdtd = fdtd::FDTD::new(
             &device,
@@ -809,31 +817,21 @@ fn main() -> anyhow::Result<()> {
 
         let mut ctrl_pressed = false;
 
-        event_loop.run(move |event, _, control_flow| match event {
+        event_loop.run(move |event, target| match event {
         winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
             match event {
                 winit::event::WindowEvent::CloseRequested => {
-                    *control_flow = winit::event_loop::ControlFlow::Exit
+                    target.exit();
                 }
                 winit::event::WindowEvent::Resized(new_size) => {
                     if new_size.width > 0 && new_size.height > 0 {
                         surface_config.width = new_size.width;
                         surface_config.height = new_size.height;
                         surface.configure(&device, &surface_config);
+                        brush.resize_view(new_size.width as f32, new_size.height as f32, &queue);
                         window.request_redraw();
                     }
-                }
-                winit::event::WindowEvent::ScaleFactorChanged {
-                    new_inner_size: new_size,
-                    ..
-                } => {
-                    if new_size.width > 0 && new_size.height > 0 {
-                        surface_config.width = new_size.width;
-                        surface_config.height = new_size.height;
-                        surface.configure(&device, &surface_config);
-                        window.request_redraw();
-                    }
-                }
+                },
                 winit::event::WindowEvent::MouseWheel { delta, .. } => match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, row) => {
                         fdtd.offset_slice_position(row);
@@ -841,470 +839,463 @@ fn main() -> anyhow::Result<()> {
                     }
                     winit::event::MouseScrollDelta::PixelDelta(_) => unimplemented!(),
                 },
-                winit::event::WindowEvent::KeyboardInput { input: winit::event::KeyboardInput {
-                    state: winit::event::ElementState::Pressed,
-                    virtual_keycode: Some(keycode),
+                winit::event::WindowEvent::KeyboardInput {
+                    event: KeyEvent {
+                        physical_key: PhysicalKey::Code(keycode),
+                        state: ElementState::Pressed,
+                        ..
+                    },
                     ..
-                }, .. } if ctrl_pressed => match keycode {
-                    winit::event::VirtualKeyCode::Space => {
+                } if ctrl_pressed => match keycode {
+                    winit::keyboard::KeyCode::Space => {
                         paused = !paused;
                         if !paused {
                             elapsed = std::time::Duration::ZERO;
                             now = std::time::Instant::now();
                         }
                     },
-                    winit::event::VirtualKeyCode::X => {
+                    winit::keyboard::KeyCode::KeyX => {
                         fdtd.set_slice_mode(fdtd::SliceMode::X);
                         window.request_redraw();
                     },
-                    winit::event::VirtualKeyCode::Y => {
+                    winit::keyboard::KeyCode::KeyY => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Y);
                         window.request_redraw();
                     },
-                    winit::event::VirtualKeyCode::Z => {
+                    winit::keyboard::KeyCode::KeyZ => {
                         fdtd.set_slice_mode(fdtd::SliceMode::Z);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::E => {
+                    winit::keyboard::KeyCode::KeyE => {
                         fdtd.set_field_view_mode(fdtd::FieldType::E);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::H => {
+                    winit::keyboard::KeyCode::KeyH => {
                         fdtd.set_field_view_mode(fdtd::FieldType::H);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::Left => {
+                    winit::keyboard::KeyCode::ArrowLeft => {
                         fdtd.scale_linear(-1.0);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::Right => {
+                    winit::keyboard::KeyCode::ArrowRight => {
                         fdtd.scale_linear(1.0);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::Up => {
+                    winit::keyboard::KeyCode::ArrowUp => {
                         fdtd.scale_exponential(1);
                         window.request_redraw();
                     }
-                    winit::event::VirtualKeyCode::Down => {
+                    winit::keyboard::KeyCode::ArrowDown => {
                         fdtd.scale_exponential(-1);
                         window.request_redraw();
                     }
                     _ => (),
                 }
                 winit::event::WindowEvent::ModifiersChanged(modifiers) => {
-                    ctrl_pressed = modifiers.ctrl();
+                    ctrl_pressed = modifiers.state().control_key();
                 }
                 winit::event::WindowEvent::DroppedFile(file) => {
                     fdtd.reload_shader(file, &device, surface_config.format).unwrap();
                     window.request_redraw();
                 }
+                winit::event::WindowEvent::RedrawRequested => {
+                    let dt = now.elapsed();
+                    elapsed += dt;
+                    now = std::time::Instant::now();
+
+                    if elapsed < tau {
+                        return;
+                    }
+                    while elapsed >= tau {
+                        elapsed -= tau;
+                    }
+
+                    if paused {
+                        return;
+                    }
+
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+
+                    fdtd.update_magnetic_field(&mut encoder);
+                    for source in magnetic_sources.iter() {
+                        match source {
+                            Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
+                                let pulse_envelope = (-((std::f32::consts::PI
+                                    * fwhm
+                                    * (step_counter as f32 * settings.temporal_step - delay))
+                                    .powi(2)
+                                    / (4.0 * (2.0 as f32).ln()))
+                                .powi(2))
+                                .exp();
+
+                                let position = [
+                                    settings.boundary.get_extra_grid_extent() / 2,
+                                    settings.boundary.get_extra_grid_extent() / 2,
+                                    settings.boundary.get_extra_grid_extent() / 2 + z_layer,
+                                ];
+
+                                let phasor = (-2.0
+                                    * std::f32::consts::PI
+                                    * (step_counter as f32 * settings.temporal_step - delay)
+                                    / wavelength).sin_cos();
+
+                                fdtd.excite_magnetic_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
+                            },
+                            Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
+                                let pulse_envelope = (-((std::f32::consts::PI
+                                    * fwhm
+                                    * (step_counter as f32 * settings.temporal_step - delay))
+                                    .powi(2)
+                                    / (4.0 * (2.0 as f32).ln()))
+                                .powi(2))
+                                .exp();
+
+                                let cw_component = (-2.0
+                                    * std::f32::consts::PI
+                                    * (step_counter as f32 * settings.temporal_step - delay)
+                                    / wavelength
+                                    + phase.to_radians())
+                                .cos();
+
+                                let direction = nalgebra::Vector3::from(*direction).normalize();
+                                let actual_position = [
+                                    ((position[0] - settings.domain[0][0] - size[0] / 2.0)
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                    ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                    ((position[2] - settings.domain[2][0] - size[2] / 2.0)
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                ];
+                                let actual_size = [
+                                    if size[0] > 0.0 {
+                                        (size[0] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                    if size[1] > 0.0 {
+                                        (size[1] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                    if size[2] > 0.0 {
+                                        (size[2] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                ];
+
+                                fdtd.excite_magnetic_field_volume(
+                                    &mut encoder,
+                                    actual_position,
+                                    actual_size,
+                                    (direction * pulse_envelope * cw_component * *power).into(),
+                                );
+                            },
+                        }
+                    }
+                    fdtd.update_electric_field(&mut encoder);
+                    for source in electric_sources.iter() {
+                        match source {
+                            Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
+                                let pulse_envelope = (-((std::f32::consts::PI
+                                    * fwhm
+                                    * (step_counter as f32 * settings.temporal_step - delay))
+                                    .powi(2)
+                                    / (4.0 * (2.0 as f32).ln()))
+                                .powi(2))
+                                .exp();
+
+                                let position = [
+                                    settings.boundary.get_extra_grid_extent() / 2,
+                                    settings.boundary.get_extra_grid_extent() / 2,
+                                    settings.boundary.get_extra_grid_extent() / 2 + z_layer,
+                                ];
+
+                                let phasor = (-2.0
+                                    * std::f32::consts::PI
+                                    * (step_counter as f32 * settings.temporal_step - delay)
+                                    / wavelength).sin_cos();
+
+                                fdtd.excite_electric_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
+                            },
+                           Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
+                                let pulse_envelope = (-((std::f32::consts::PI
+                                    * fwhm
+                                    * (step_counter as f32 * settings.temporal_step - delay))
+                                    .powi(2)
+                                    / (4.0 * (2.0 as f32).ln()))
+                                .powi(2))
+                                .exp();
+
+                                let cw_component = (-2.0
+                                    * std::f32::consts::PI
+                                    * (step_counter as f32 * settings.temporal_step - delay)
+                                    / wavelength
+                                    + phase.to_radians())
+                               .cos();
+
+                                let direction = nalgebra::Vector3::from(*direction).normalize();
+                                let actual_position = [
+                                    ((position[0] - settings.domain[0][0] - size[0] / 2.0)
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                    ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                    ((position[2] - settings.domain[2][0] - size[2] / 2.0)
+                                        / settings.spatial_step)
+                                        .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
+                                ];
+                                let actual_size = [
+                                    if size[0] > 0.0 {
+                                        (size[0] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                    if size[1] > 0.0 {
+                                        (size[1] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                    if size[2] > 0.0 {
+                                        (size[2] / settings.spatial_step).ceil() as u32
+                                    } else {
+                                        1
+                                    },
+                                ];
+
+                                fdtd.excite_electric_field_volume(
+                                    &mut encoder,
+                                    actual_position,
+                                    actual_size,
+                                    (direction * pulse_envelope * cw_component * *power).into(),
+                                );
+                            },
+                        }
+                    }
+
+                    step_counter += 1;
+
+                    while let Some(timing) = settings.pause_at.first() {
+                        let step = match timing {
+                            TimingSettings::Step(step) => *step,
+                            TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
+                       };
+
+                        if step == step_counter {
+                            settings.pause_at.remove(0);
+                            paused = true;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    while let Some(export) = settings.exports.first() {
+                        let step = match export.timing {
+                            TimingSettings::Step(step) => step,
+                            TimingSettings::Time(time) => {
+                                (time / settings.temporal_step).round() as u32
+                            }
+                        };
+
+                        if step == step_counter {
+                            let mut export_encoder = device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                            match export.export {
+                                ExportFieldSettings::D3 { field } => {
+                                    let field_texture = match field {
+                                        fdtd::FieldType::E => {
+                                            fdtd.get_electric_field_textures()[0].as_image_copy()
+                                        }
+                                        fdtd::FieldType::H => {
+                                            fdtd.get_magnetic_field_textures()[0].as_image_copy()
+                                        }
+                                    };
+
+                                   let dimension = fdtd.get_dimension();
+
+                                    let bytes_per_pixel = 1 * std::mem::size_of::<f32>() as u32;
+                                    let unpadded_bytes_per_row = dimension[0] * bytes_per_pixel;
+                                    let padded_bytes_per_row_padding =
+                                        (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+                                            - unpadded_bytes_per_row
+                                                % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                                            % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                                    let padded_bytes_per_row =
+                                        unpadded_bytes_per_row + padded_bytes_per_row_padding;
+
+                                    let copy_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                                        label: None,
+                                        size: (padded_bytes_per_row * dimension[1] * dimension[2])
+                                            as u64,
+                                        usage: wgpu::BufferUsages::COPY_DST
+                                            | wgpu::BufferUsages::MAP_READ,
+                                        mapped_at_creation: false,
+                                    });
+
+                                    export_encoder.copy_texture_to_buffer(
+                                        field_texture,
+                                        wgpu::ImageCopyBufferBase {
+                                            buffer: &copy_buffer,
+                                            layout: wgpu::ImageDataLayout {
+                                                offset: 0,
+                                                bytes_per_row: Some(padded_bytes_per_row),
+                                                rows_per_image: Some(dimension[1]),
+                                            },
+                                        },
+                                        wgpu::Extent3d {
+                                            width: dimension[0],
+                                            height: dimension[1],
+                                            depth_or_array_layers: dimension[2],
+                                        },
+                                    );
+                                    let index = queue.submit(Some(export_encoder.finish()));
+
+                                    let (sender, receiver) =
+                                        futures_intrusive::channel::shared::oneshot_channel();
+                                    let map_slice = copy_buffer.slice(..);
+                                    map_slice.map_async(wgpu::MapMode::Read, move |v| {
+                                        sender.send(v).unwrap()
+                                    });
+                                    device.poll(wgpu::Maintain::WaitForSubmissionIndex(index));
+
+                                    if let Some(Ok(())) = receiver.receive().block_on() {
+                                        {
+                                            let data = map_slice.get_mapped_range();
+                                            let raw_data: Vec<u8> = data
+                                                .chunks(padded_bytes_per_row as usize)
+                                                .flat_map(|row| &row[..unpadded_bytes_per_row as usize])
+                                                .cloned()
+                                                .collect();
+
+                                            let mut dds =
+                                                ddsfile::Dds::new_dxgi(ddsfile::NewDxgiParams {
+                                                    height: dimension[1],
+                                                    width: dimension[0],
+                                                    depth: Some(dimension[2]),
+                                                    format: ddsfile::DxgiFormat::R32_Float,
+                                                    mipmap_levels: None,
+                                                    array_layers: None,
+                                                    caps2: None,
+                                                    is_cubemap: false,
+                                                    resource_dimension:
+                                                        ddsfile::D3D10ResourceDimension::Texture3D,
+                                                    alpha_mode: ddsfile::AlphaMode::Unknown,
+                                                })
+                                                .unwrap();
+
+                                            dds.data = raw_data;
+
+                                            let mut file = std::fs::OpenOptions::new()
+                                                .write(true)
+                                                .truncate(true)
+                                                .create(true)
+                                                .open(std::env::current_dir().unwrap().join(format!(
+                                                    "{}-D3-{:?}-{}.dds",
+                                                    options.preset.as_ref().unwrap(),
+                                                    field,
+                                                    step_counter
+                                                )))
+                                                .unwrap();
+
+                                            dds.write(&mut file).unwrap();
+                                        }
+                                        copy_buffer.unmap();
+                                    }
+                                }
+                                ExportFieldSettings::D2(ref _settings) => {
+                                    eprintln!("2D Slice Not Yet Implemented")
+                                }
+                            }
+                            settings.exports.remove(0);
+                            now = std::time::Instant::now();
+                            elapsed = std::time::Duration::ZERO;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let surface_texture = match surface.get_current_texture() {
+                        Ok(texture) => texture,
+                        Err(err) => match err {
+                            wgpu::SurfaceError::Timeout => {
+                                return;
+                            }
+                            wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+                                surface.configure(&device, &surface_config);
+                                return;
+                            }
+                            wgpu::SurfaceError::OutOfMemory => panic!("OUT OF MEMORY!"),
+                        },
+                    };
+                    let surf_texture_view = surface_texture
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+
+                        brush.queue(&device, &queue, vec![TextSection {
+                            screen_position: (0.0, 0.0),
+                            bounds: (surface_config.width as f32, surface_config.height as f32),
+                            text: vec![Text::new(&format!(
+                                "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}, Scaling factor: {:.1}, field: {:?}",
+                                step_counter,
+                                step_counter as f32 * settings.temporal_step,
+                                fps_counter,
+                                fdtd.get_slice_mode(),
+                                fdtd.get_slice_position(),
+                                fdtd.get_scaling_factor(),
+                                fdtd.get_field_view_mode()
+                            ))
+                            .with_color([1.0, 0.0, 0.0, 1.0])
+                            .with_scale(20.0)],
+                            ..Default::default()
+                        }]).unwrap();
+
+                    {
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &surf_texture_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        fdtd.visualize(&mut render_pass);
+                        brush.draw(&mut render_pass);
+                    }
+
+                    let last_display_delta = last_display_time.elapsed();
+                    if last_display_delta >= show_fps_duration {
+                        fps_counter = (step_counter - last_display_step) as f32 / last_display_delta.as_secs_f32();
+                        last_display_time = std::time::Instant::now();
+                        last_display_step = step_counter;
+                    }
+
+                    queue.submit(std::iter::once(encoder.finish()));
+                    surface_texture.present();
+                }
                 _ => (),
             }
         }
-        winit::event::Event::MainEventsCleared => if !paused {
+        winit::event::Event::AboutToWait => if !paused {
             window.request_redraw();
-            *control_flow = winit::event_loop::ControlFlow::Poll;
+            target.set_control_flow(winit::event_loop::ControlFlow::Poll);
         } else {
-            *control_flow = winit::event_loop::ControlFlow::Wait;
+            target.set_control_flow(winit::event_loop::ControlFlow::Wait);
         },
-        winit::event::Event::RedrawRequested(_) => {
-            let dt = now.elapsed();
-            elapsed += dt;
-            now = std::time::Instant::now();
-
-            if elapsed < tau {
-                return;
-            }
-            while elapsed >= tau {
-                elapsed -= tau;
-            }
-
-            if paused {
-                return;
-            }
-
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-
-            fdtd.update_magnetic_field(&mut encoder);
-            for source in magnetic_sources.iter() {
-                match source {
-                    Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
-                        let pulse_envelope = (-((std::f32::consts::PI
-                            * fwhm
-                            * (step_counter as f32 * settings.temporal_step - delay))
-                            .powi(2)
-                            / (4.0 * (2.0 as f32).ln()))
-                        .powi(2))
-                        .exp();
-
-                        let position = [
-                            settings.boundary.get_extra_grid_extent() / 2,
-                            settings.boundary.get_extra_grid_extent() / 2,
-                            settings.boundary.get_extra_grid_extent() / 2 + z_layer,
-                        ];
-
-                        let phasor = (-2.0
-                            * std::f32::consts::PI
-                            * (step_counter as f32 * settings.temporal_step - delay)
-                            / wavelength).sin_cos();
-
-                        fdtd.excite_magnetic_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
-                    },
-                    Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
-                        let pulse_envelope = (-((std::f32::consts::PI
-                            * fwhm
-                            * (step_counter as f32 * settings.temporal_step - delay))
-                            .powi(2)
-                            / (4.0 * (2.0 as f32).ln()))
-                        .powi(2))
-                        .exp();
-
-                        let cw_component = (-2.0
-                            * std::f32::consts::PI
-                            * (step_counter as f32 * settings.temporal_step - delay)
-                            / wavelength
-                            + phase.to_radians())
-                        .cos();
-
-                        let direction = nalgebra::Vector3::from(*direction).normalize();
-                        let actual_position = [
-                            ((position[0] - settings.domain[0][0] - size[0] / 2.0)
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                            ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                            ((position[2] - settings.domain[2][0] - size[2] / 2.0)
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                        ];
-                        let actual_size = [
-                            if size[0] > 0.0 {
-                                (size[0] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                            if size[1] > 0.0 {
-                                (size[1] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                            if size[2] > 0.0 {
-                                (size[2] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                        ];
-
-                        fdtd.excite_magnetic_field_volume(
-                            &mut encoder,
-                            actual_position,
-                            actual_size,
-                            (direction * pulse_envelope * cw_component * *power).into(),
-                        );
-                    },
-                }
-            }
-            fdtd.update_electric_field(&mut encoder);
-            for source in electric_sources.iter() {
-                match source {
-                    Source::Texture { source_bind_group, z_layer, wavelength, delay, fwhm } => {
-                        let pulse_envelope = (-((std::f32::consts::PI
-                            * fwhm
-                            * (step_counter as f32 * settings.temporal_step - delay))
-                            .powi(2)
-                            / (4.0 * (2.0 as f32).ln()))
-                        .powi(2))
-                        .exp();
-
-                        let position = [
-                            settings.boundary.get_extra_grid_extent() / 2,
-                            settings.boundary.get_extra_grid_extent() / 2,
-                            settings.boundary.get_extra_grid_extent() / 2 + z_layer,
-                        ];
-
-                        let phasor = (-2.0
-                            * std::f32::consts::PI
-                            * (step_counter as f32 * settings.temporal_step - delay)
-                            / wavelength).sin_cos();
-
-                        fdtd.excite_electric_field_mode(&mut encoder, position, phasor, pulse_envelope, source_bind_group);
-                    },
-                    Source::Volume { direction, wavelength, position, size, phase, delay, fwhm, power } => {
-                        let pulse_envelope = (-((std::f32::consts::PI
-                            * fwhm
-                            * (step_counter as f32 * settings.temporal_step - delay))
-                            .powi(2)
-                            / (4.0 * (2.0 as f32).ln()))
-                        .powi(2))
-                        .exp();
-
-                        let cw_component = (-2.0
-                            * std::f32::consts::PI
-                            * (step_counter as f32 * settings.temporal_step - delay)
-                            / wavelength
-                            + phase.to_radians())
-                        .cos();
-
-                        let direction = nalgebra::Vector3::from(*direction).normalize();
-                        let actual_position = [
-                            ((position[0] - settings.domain[0][0] - size[0] / 2.0)
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                            ((position[1] - settings.domain[1][0] - size[1] / 2.0 )
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                            ((position[2] - settings.domain[2][0] - size[2] / 2.0)
-                                / settings.spatial_step)
-                                .ceil() as u32 + settings.boundary.get_extra_grid_extent() / 2,
-                        ];
-                        let actual_size = [
-                            if size[0] > 0.0 {
-                                (size[0] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                            if size[1] > 0.0 {
-                                (size[1] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                            if size[2] > 0.0 {
-                                (size[2] / settings.spatial_step).ceil() as u32
-                            } else {
-                                1
-                            },
-                        ];
-
-                        fdtd.excite_electric_field_volume(
-                            &mut encoder,
-                            actual_position,
-                            actual_size,
-                            (direction * pulse_envelope * cw_component * *power).into(),
-                        );
-                    },
-                }
-            }
-
-            step_counter += 1;
-
-            while let Some(timing) = settings.pause_at.first() {
-                let step = match timing {
-                    TimingSettings::Step(step) => *step,
-                    TimingSettings::Time(time) => (time / settings.temporal_step).round() as u32,
-                };
-
-                if step == step_counter {
-                    settings.pause_at.remove(0);
-                    paused = true;
-                } else {
-                    break;
-                }
-            }
-
-            while let Some(export) = settings.exports.first() {
-                let step = match export.timing {
-                    TimingSettings::Step(step) => step,
-                    TimingSettings::Time(time) => {
-                        (time / settings.temporal_step).round() as u32
-                    }
-                };
-
-                if step == step_counter {
-                    let mut export_encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                    match export.export {
-                        ExportFieldSettings::D3 { field } => {
-                            let field_texture = match field {
-                                fdtd::FieldType::E => {
-                                    fdtd.get_electric_field_textures()[0].as_image_copy()
-                                }
-                                fdtd::FieldType::H => {
-                                    fdtd.get_magnetic_field_textures()[0].as_image_copy()
-                                }
-                            };
-
-                            let dimension = fdtd.get_dimension();
-
-                            let bytes_per_pixel = 1 * std::mem::size_of::<f32>() as u32;
-                            let unpadded_bytes_per_row = dimension[0] * bytes_per_pixel;
-                            let padded_bytes_per_row_padding =
-                                (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
-                                    - unpadded_bytes_per_row
-                                        % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-                                    % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-                            let padded_bytes_per_row =
-                                unpadded_bytes_per_row + padded_bytes_per_row_padding;
-
-                            let copy_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                                label: None,
-                                size: (padded_bytes_per_row * dimension[1] * dimension[2])
-                                    as u64,
-                                usage: wgpu::BufferUsages::COPY_DST
-                                    | wgpu::BufferUsages::MAP_READ,
-                                mapped_at_creation: false,
-                            });
-
-                            export_encoder.copy_texture_to_buffer(
-                                field_texture,
-                                wgpu::ImageCopyBufferBase {
-                                    buffer: &copy_buffer,
-                                    layout: wgpu::ImageDataLayout {
-                                        offset: 0,
-                                        bytes_per_row: Some(padded_bytes_per_row),
-                                        rows_per_image: Some(dimension[1]),
-                                    },
-                                },
-                                wgpu::Extent3d {
-                                    width: dimension[0],
-                                    height: dimension[1],
-                                    depth_or_array_layers: dimension[2],
-                                },
-                            );
-                            let index = queue.submit(Some(export_encoder.finish()));
-
-                            let (sender, receiver) =
-                                futures_intrusive::channel::shared::oneshot_channel();
-                            let map_slice = copy_buffer.slice(..);
-                            map_slice.map_async(wgpu::MapMode::Read, move |v| {
-                                sender.send(v).unwrap()
-                            });
-                            device.poll(wgpu::Maintain::WaitForSubmissionIndex(index));
-
-                            if let Some(Ok(())) = receiver.receive().block_on() {
-                                {
-                                    let data = map_slice.get_mapped_range();
-                                    let raw_data: Vec<u8> = data
-                                        .chunks(padded_bytes_per_row as usize)
-                                        .flat_map(|row| &row[..unpadded_bytes_per_row as usize])
-                                        .cloned()
-                                        .collect();
-
-                                    let mut dds =
-                                        ddsfile::Dds::new_dxgi(ddsfile::NewDxgiParams {
-                                            height: dimension[1],
-                                            width: dimension[0],
-                                            depth: Some(dimension[2]),
-                                            format: ddsfile::DxgiFormat::R32_Float,
-                                            mipmap_levels: None,
-                                            array_layers: None,
-                                            caps2: None,
-                                            is_cubemap: false,
-                                            resource_dimension:
-                                                ddsfile::D3D10ResourceDimension::Texture3D,
-                                            alpha_mode: ddsfile::AlphaMode::Unknown,
-                                        })
-                                        .unwrap();
-
-                                    dds.data = raw_data;
-
-                                    let mut file = std::fs::OpenOptions::new()
-                                        .write(true)
-                                        .truncate(true)
-                                        .create(true)
-                                        .open(std::env::current_dir().unwrap().join(format!(
-                                            "{}-D3-{:?}-{}.dds",
-                                            options.preset.as_ref().unwrap(),
-                                            field,
-                                            step_counter
-                                        )))
-                                        .unwrap();
-
-                                    dds.write(&mut file).unwrap();
-                                }
-                                copy_buffer.unmap();
-                            }
-                        }
-                        ExportFieldSettings::D2(ref _settings) => {
-                            eprintln!("2D Slice Not Yet Implemented")
-                        }
-                    }
-                    settings.exports.remove(0);
-                    now = std::time::Instant::now();
-                    elapsed = std::time::Duration::ZERO;
-                } else {
-                    break;
-                }
-            }
-
-            let surface_texture = match surface.get_current_texture() {
-                Ok(texture) => texture,
-                Err(err) => match err {
-                    wgpu::SurfaceError::Timeout => {
-                        return;
-                    }
-                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
-                        surface.configure(&device, &surface_config);
-                        return;
-                    }
-                    wgpu::SurfaceError::OutOfMemory => panic!("OUT OF MEMORY!"),
-                },
-            };
-            let surf_texture_view = surface_texture
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-
-            {
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &surf_texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                });
-
-                fdtd.visualize(&mut render_pass);
-            }
-
-            let last_display_delta = last_display_time.elapsed();
-            if last_display_delta >= show_fps_duration {
-                fps_counter = (step_counter - last_display_step) as f32 / last_display_delta.as_secs_f32();
-                last_display_time = std::time::Instant::now();
-                last_display_step = step_counter;
-            }
-
-            glyph_brush.queue(wgpu_glyph::Section {
-                screen_position: (0.0, 0.0),
-                bounds: (surface_config.width as f32, surface_config.height as f32),
-                text: vec![wgpu_glyph::Text::new(&format!(
-                    "Time step: {} (ct = {:.3}), Steps/sec: {:.3}, Slice position: {:?} = {}, Scaling factor: {:.1}, field: {:?}",
-                    step_counter,
-                    step_counter as f32 * settings.temporal_step,
-                    fps_counter,
-                    fdtd.get_slice_mode(),
-                    fdtd.get_slice_position(),
-                    fdtd.get_scaling_factor(),
-                    fdtd.get_field_view_mode()
-                ))
-                .with_color([1.0, 0.0, 0.0, 1.0])
-                .with_scale(20.0)],
-                ..Default::default()
-            });
-
-            glyph_brush
-                .draw_queued(
-                    &device,
-                    &mut staging_belt,
-                    &mut encoder,
-                    &surf_texture_view,
-                    surface_config.width,
-                    surface_config.height,
-                )
-                .unwrap();
-
-            staging_belt.finish();
-            queue.submit(std::iter::once(encoder.finish()));
-            surface_texture.present();
-            staging_belt.recall();
-        }
         _ => (),
-    });
+    })?;
     } else {
         assert!(
             settings.pause_at.len() > 0,
@@ -1313,4 +1304,6 @@ fn main() -> anyhow::Result<()> {
 
         unimplemented!("currently unsupported because too buggy");
     }
+
+    Ok(())
 }
